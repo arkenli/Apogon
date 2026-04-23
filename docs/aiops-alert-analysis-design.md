@@ -2,7 +2,7 @@
 
 版本：v0.1
 日期：2026-04-21
-技术栈默认：Java 26 + Spring Boot + MySQL
+技术栈默认：JDK 21 + Spring Boot + MySQL
 
 ## 1. 背景与目标
 
@@ -227,9 +227,29 @@ public record AlertEvent(
     String rawText,
     Instant metricOccurTime,
     Instant receivedAt,
-    Map<String, Object> triggerValues
+    AlertTriggerValues triggerValues
 ) {}
 ```
+
+`AlertTriggerValues` 定义：
+
+```java
+public record AlertTriggerValues(
+    Double requestCount,
+    Double failRate,
+    Long avgLatencyMs,
+    Long p99LatencyMs,
+    Long maxLatencyMs,
+    String thresholdExpression,
+    String rawMetricValueText
+) {}
+```
+
+说明：
+
+1. 不使用 `Map<String, Object>`，避免字段语义不清、后续代码大量强制类型转换，也便于 AI 和开发人员按明确字段实现。
+2. 不同告警类型只填充相关字段，例如错误率告警填充 `requestCount` 和 `failRate`，时延告警填充 `requestCount`、`avgLatencyMs` 或 `p99LatencyMs`。
+3. 无法结构化解析的原始指标片段放入 `rawMetricValueText`，后续新增字段时通过扩展 `AlertTriggerValues` 明确建模。
 
 `triggerValues` 示例：
 
@@ -239,19 +259,25 @@ public record AlertEvent(
   "failRate": 1.0,
   "avgLatencyMs": 3067,
   "p99LatencyMs": null,
-  "threshold": "avg_latency > 3000ms for 5m"
+  "maxLatencyMs": null,
+  "thresholdExpression": "avg_latency > 3000ms for 5m",
+  "rawMetricValueText": "平均时延=3067, 请求总数=49.0"
 }
 ```
 
-### 5.3 AnalysisTask
+### 5.3 AnalysisJob
 
 ```java
-public record AnalysisTask(
+public record AnalysisJob(
     String taskId,
     String alertId,
     AlertCategory category,
     String dedupeKey,
-    String status,
+    AnalysisJobStatus status,
+    String currentStep,
+    String statusReason,
+    int retryCount,
+    long stateVersion,
     Instant createdAt,
     Instant startedAt,
     Instant finishedAt,
@@ -259,16 +285,39 @@ public record AnalysisTask(
 ) {}
 ```
 
-任务状态：
+分析任务必须使用显式状态机管理生命周期，每一步执行前后都要更新 DB 状态，便于排障、恢复和统计耗时。
+
+状态枚举：
 
 ```text
 PENDING
 RUNNING
+COLLECTING_EVIDENCE
+RULE_ANALYZING
+COMPRESSING_EVIDENCE
+LLM_ANALYZING
+RULE_FALLBACK_ANALYZING
+GENERATING_RESULT
 SUCCESS
 FAILED
 DEGRADED_SUCCESS
 SKIPPED_DUPLICATE
 ```
+
+状态说明：
+
+1. `PENDING`：任务已创建，等待异步执行。
+2. `RUNNING`：任务开始执行，用于标记整体运行态。
+3. `COLLECTING_EVIDENCE`：正在并行调用 Provider 获取指标、日志、Trace、基线、资源映射。
+4. `RULE_ANALYZING`：正在执行规则预分析。
+5. `COMPRESSING_EVIDENCE`：正在生成 LLM 输入证据包。
+6. `LLM_ANALYZING`：正在调用大模型并校验输出。
+7. `RULE_FALLBACK_ANALYZING`：LLM 不可用或输出不合法，正在执行规则降级策略。
+8. `GENERATING_RESULT`：正在合并结论并生成最终结果。
+9. `SUCCESS`：正常完成，通常 `analysisMode=LLM_ASSISTED` 或 `RULE_BASED_ONLY`。
+10. `DEGRADED_SUCCESS`：降级完成，例如 LLM 不可用或 Provider 部分失败。
+11. `FAILED`：告警关键字段缺失、告警类型不支持、状态机执行异常，导致无法生成任何有效结果。
+12. `SKIPPED_DUPLICATE`：可选状态。默认实现不为 5 分钟内重复告警创建新任务，只写 `aiops_duplicate_alert_link` 并返回已有 taskId；如果后续需要为每条重复告警保留任务记录，可创建状态为 `SKIPPED_DUPLICATE` 的影子任务。
 
 ### 5.4 AnalysisContext
 
@@ -286,7 +335,28 @@ public record AnalysisContext(
 
 1. 错误率告警：`occurTime - 5m` 到 `occurTime + 2m`。
 2. 时延告警：`occurTime - 10m` 到 `occurTime + 2m`。
-3. 基线：最近 7 天同时间段，排除当前告警窗口。
+3. 基线：默认取前一天同时间段，避免最近 7 天大范围查询导致接口慢或查不出数据。
+
+通用 DTO：
+
+```java
+public record TimeWindow(
+    Instant startTime,
+    Instant endTime
+) {}
+
+public record AnalysisOptions(
+    int maxInterfaceLogLimit,
+    int maxTraceSampleSize,
+    int maxSlowTraceSampleSize,
+    int maxRuntimeLogSize,
+    int runtimeLogMessageMaxChars,
+    int maxErrorCodeSize,
+    int maxUidSize,
+    boolean llmEnabled,
+    boolean providerParallelEnabled
+) {}
+```
 
 ### 5.5 EvidenceBundle
 
@@ -303,6 +373,16 @@ public record EvidenceBundle(
 ) {}
 ```
 
+证据 DTO 落地约束：
+
+1. `BaselineEvidence` 直接包装 `InterfaceBaseline` 和缺失原因。
+2. `InterfaceLogEvidence` 至少包含总请求数、失败数、失败率、时延分布、errorCode/errorMsg 聚合、uid 聚合和样本日志。
+3. `TraceEvidence` 至少包含采样 traceId、每条 trace 的关键 span、首个失败 span、最慢 span 和下游聚合。
+4. `RuntimeLogEvidence` 至少包含按 traceId 和 serviceName 查询到的 WARN/ERROR 日志样本。
+5. `MetricEvidence` 至少包含容器、CSE、DB、DCS、MQ 的指标异常列表和 Provider 缺失信息。
+6. `RuleAnalysisEvidence` 至少包含规则发现列表、候选根因分数和 evidenceId 索引。
+7. 每个 Evidence 子对象都要能表达“数据缺失”，不能用 null 让后续分析器猜测是无异常还是未查询到。
+
 ### 5.6 AnalysisResult
 
 ```java
@@ -316,9 +396,13 @@ public record AnalysisResult(
     List<RootCauseHypothesis> rootCauses,
     List<Recommendation> recommendations,
     List<EvidenceReference> evidenceRefs,
+    List<MissingEvidence> missingEvidence,
+    List<String> insufficientEvidence,
+    HistoricalReference historicalReference,
     boolean llmUsed,
     String llmStatus,
     boolean degraded,
+    boolean degradedByProviderFailure,
     String degradedReason,
     double overallConfidence,
     Instant generatedAt
@@ -339,6 +423,45 @@ RULE_BASED_ONLY
 2. `RULE_BASED_DEGRADED`：LLM 不可用、超时或输出校验失败后，由规则降级策略生成结论。
 3. `RULE_BASED_ONLY`：主动关闭 LLM 时，仅使用规则策略分析，非异常降级。
 4. 当 `analysisMode=RULE_BASED_DEGRADED` 时，接口返回和 IM 展示必须明确标注“该结论由规则降级策略生成，未使用大模型”。
+
+```java
+public record MissingEvidence(
+    String providerName,
+    String reason,
+    boolean critical,
+    String impact
+) {}
+
+public record HistoricalReference(
+    boolean matched,
+    String alertId,
+    String taskId,
+    String analysisMode,
+    String summary,
+    double overallConfidence,
+    Instant generatedAt
+) {}
+```
+
+```java
+public record ImpactAssessment(
+    String level,
+    String description
+) {}
+
+public record Recommendation(
+    String priority,
+    String actionType,
+    String description,
+    String target
+) {}
+
+public record EvidenceReference(
+    String evidenceId,
+    String evidenceType,
+    String description
+) {}
+```
 
 ### 5.7 RootCauseHypothesis
 
@@ -400,9 +523,18 @@ Content-Type: text/plain
   "taskId": "task_20260421103831_xxx",
   "status": "PENDING",
   "duplicate": false,
+  "historicalReference": {
+    "matched": true,
+    "alertId": "521600500",
+    "taskId": "task_20260420181340_xxx",
+    "summary": "历史告警疑似业务 errorCode 未屏蔽。",
+    "overallConfidence": 0.78
+  },
   "message": "analysis task accepted"
 }
 ```
+
+`historicalReference` 只表示 5 分钟外存在相同 dedupeKey 的历史完成结果，供值班人员参考；本次告警仍会创建新的分析任务。
 
 如果 5 分钟内存在相同 dedupeKey 的运行中或已完成任务：
 
@@ -505,9 +637,105 @@ dedupeWindow = 5 minutes
 
 如果窗口内已有 `PENDING`、`RUNNING`、`SUCCESS`、`DEGRADED_SUCCESS` 任务，则新告警关联到旧任务，不重复分析。
 
+如果 5 分钟窗口内没有命中重复告警，但历史上存在相同 `dedupeKey` 且已经处理完成的告警，不阻塞本次分析，也不复用历史结论；系统应在本次分析结果中附加历史参考信息，供值班人员判断是否为重复问题。
+
+历史参考信息建议返回：
+
+```json
+{
+  "historicalReference": {
+    "matched": true,
+    "lookback": "P1D",
+    "alertId": "521600500",
+    "taskId": "task_20260420181340_xxx",
+    "analysisMode": "LLM_ASSISTED",
+    "summary": "历史告警疑似业务 errorCode 未屏蔽。",
+    "overallConfidence": 0.78,
+    "generatedAt": "2026-04-20T18:15:00+08:00"
+  }
+}
+```
+
+默认只查询最近 1 天的历史结果；该窗口应做成配置项，避免无限制扫描历史表。
+
 ## 8. 数据 Provider 抽象
 
-所有 Provider 一期只定义接口和 DTO，不实现真实内网调用。
+Provider 分为两类：
+
+1. 外部数据 Provider：监控指标、接口日志、Trace、运行日志、基线数据。一期只定义接口和 DTO，不实现真实内网 HTTP 调用，可提供 Mock 或 Stub。
+2. 本地数据 Provider：ResourceMappingProvider。一期必须实现，从 MySQL 预置表 `aiops_resource_mapping` 读取服务到 DB/DCS/MQ 的映射关系。
+
+### 8.0 Provider 并行调用与降级方案
+
+Provider 之间没有管理或数据依赖关系时，应并行调用以降低整体分析耗时。例如容器指标、数据库指标、DCS 指标、MQ 指标、基线数据、接口日志可以在同一阶段并行获取；Trace 明细依赖接口日志中的 traceId，应在接口日志返回后再并行查询。
+
+推荐执行模型：
+
+```text
+阶段 1：并行获取 ResourceMapping、Baseline、InterfaceLog、ContainerMetrics、CseMetrics
+阶段 2：ResourceMapping 返回后，并行获取 DatabaseMetrics、DcsMetrics、MqMetrics
+阶段 3：InterfaceLog 返回后，抽样 traceId，并行获取 Trace 和 RuntimeLog
+阶段 4：汇总 ProviderResult，进入规则预分析
+```
+
+Provider 返回值建议统一包装：
+
+```java
+public record ProviderResult<T>(
+    String providerName,
+    ProviderStatus status,
+    T data,
+    String errorCode,
+    String errorMessage,
+    Duration latency
+) {}
+
+public enum ProviderStatus {
+    SUCCESS,
+    PARTIAL_SUCCESS,
+    FAILED,
+    TIMEOUT,
+    SKIPPED
+}
+```
+
+当某个 Provider 数据获取失败时，以下方案作为评审选项保留；在没有新的评审结论前，开发按本节后面的“一期默认落地口径”实现。
+
+| 方案 | 处理方式 | 优点 | 风险 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| 方案 A：部分证据继续分析 | 失败 Provider 标记为 missingEvidence，其它 Provider 正常分析并输出结论 | 分析时效最好，单点 Provider 故障不阻塞整体 | 结论置信度可能下降 | 推荐作为一期默认方案 |
+| 方案 B：关键 Provider 失败则降级 | 为不同告警类型定义关键 Provider，例如错误率告警必须有接口日志，时延告警必须有接口日志和 Trace；关键 Provider 失败则输出“证据不足”的规则降级结果 | 避免在核心证据缺失时给出误导性根因 | 可能降低自动定位覆盖率 | 对准确性要求高于时效的场景 |
+| 方案 C：短重试 + 部分证据继续分析 | Provider 失败后按小间隔重试 1-2 次，仍失败则按方案 A 继续 | 可缓解瞬时网络抖动 | 增加分析耗时 | Provider 偶发超时较多但 1-3 分钟 SLA 仍可接受 |
+| 方案 D：历史证据补偿 | 当前 Provider 失败时，读取最近一次同 dedupeKey 的成功证据作为参考，并明确标注为 historicalEvidence | 对反复出现的告警有帮助 | 历史证据可能过期，不能作为当前事实 | 重复告警、周期性问题 |
+
+无论选择哪种方案，最终结果必须包含：
+
+1. `missingEvidence`：缺失的 Provider 和失败原因。
+2. `degradedByProviderFailure`：是否因 Provider 失败导致降级。
+3. 降低后的 `overallConfidence`。
+4. 明确说明“哪些结论没有对应 Provider 证据支撑”。
+
+推荐一期采用方案 A + 方案 C：关键路径不被单个非核心 Provider 阻塞，同时对超时做短重试。对于接口日志 Provider，建议按方案 B 处理，因为错误率和时延分析都强依赖接口日志。
+
+为了避免开发时对“关键 Provider 失败”理解不一致，一期默认采用以下落地口径：
+
+1. 告警解析失败、无法得到 `serviceName`、`interfaceName`、`category`、`occurTime` 时，任务进入 `FAILED`。
+2. InterfaceLogProvider 失败时，任务不直接 `FAILED`，而是进入规则降级结果：`analysisMode=RULE_BASED_DEGRADED`，主根因为 `UNKNOWN`，明确输出“接口日志缺失，无法定位 errorCode、uid、trace 和接口耗时分布”，任务状态为 `DEGRADED_SUCCESS`。
+3. TraceProvider 失败时，错误率告警仍可基于接口日志、errorMsg 和资源指标分析；时延告警需要降低下游慢点判断置信度，并输出 missingEvidence。
+4. MetricProvider、BaselineProvider、RuntimeLogProvider 部分失败时，继续分析，降低相关根因置信度。
+5. ResourceMappingProvider 失败通常表示本地配置缺失或数据库异常。服务资源映射缺失时继续分析接口日志和容器指标，但跳过 DB/DCS/MQ 指标；ResourceMapping 表不可读时标记为 Provider 失败。
+
+关键性矩阵：
+
+| Provider | 错误率告警 | 时延告警 | 失败后的默认处理 |
+| --- | --- | --- | --- |
+| InterfaceLogProvider | 关键 | 关键 | 输出规则降级结果，状态 `DEGRADED_SUCCESS` |
+| TraceProvider | 重要 | 关键 | 错误率继续分析；时延输出降级结果或显著降低下游判断置信度 |
+| RuntimeLogProvider | 可选 | 可选 | 记录 missingEvidence，继续分析 |
+| MetricProvider.Container/CSE | 重要 | 重要 | 记录 missingEvidence，继续分析 |
+| MetricProvider.DB/DCS/MQ | 可选，依赖 ResourceMapping | 重要，依赖 ResourceMapping | 映射存在但指标失败时记录 missingEvidence，继续分析 |
+| BaselineProvider | 重要 | 重要 | 记录 missingEvidence，继续分析，不做基线突增判断 |
+| ResourceMappingProvider | 重要 | 重要 | 映射缺失时跳过依赖资源指标；表不可读时记录 Provider 失败 |
 
 ### 8.1 MetricProvider
 
@@ -580,7 +808,7 @@ public record InterfaceLogEntry(
     String uid,
     boolean success,
     String errorCode,
-    String errorMessage,
+    String errorMsg,
     long latencyMs,
     Instant timestamp
 ) {}
@@ -635,18 +863,53 @@ public interface BaselineProvider {
         String cluster,
         Instant occurTime,
         Duration compareDuration,
-        int days
+        int baselineOffsetDays
     );
 }
 ```
 
 基线内容：
 
-1. 同时间段请求量均值、P50、P90、最大值。
-2. 同时间段失败率均值、P90、最大值。
-3. 同时间段平均时延、P99 时延均值、P90、最大值。
+1. 前一天同时间段请求量平均值、P99、最大值。
+2. 前一天同时间段失败率平均值、P99、最大值。
+3. 前一天同时间段平均时延、P99 时延的平均值、P99、最大值。
 4. 常见 errorCode TopN。
 5. 历史是否发生过同类告警。
+
+基线窗口计算：
+
+```text
+alarmWindow = [occurTime - compareDuration / 2, occurTime + compareDuration / 2]
+baselineWindow = [alarmWindow.start - baselineOffsetDays, alarmWindow.end - baselineOffsetDays]
+```
+
+例如 `occurTime=2026-04-21T10:33:00+08:00`、`compareDuration=PT10M`、`baselineOffsetDays=1` 时，基线窗口为 `2026-04-20 10:28:00` 到 `2026-04-20 10:38:00`。
+
+```java
+public record InterfaceBaseline(
+    Double requestCountAvg,
+    Double requestCountP99,
+    Double requestCountMax,
+    Double failRateAvg,
+    Double failRateP99,
+    Double failRateMax,
+    Long avgLatencyAvgMs,
+    Long avgLatencyP99Ms,
+    Long avgLatencyMaxMs,
+    Long p99LatencyAvgMs,
+    Long p99LatencyP99Ms,
+    Long p99LatencyMaxMs,
+    List<ErrorCodeBaseline> commonErrorCodes,
+    boolean sameAlertOccurred
+) {}
+
+public record ErrorCodeBaseline(
+    String errorCode,
+    long count,
+    double share,
+    List<String> sampleErrorMsgs
+) {}
+```
 
 ### 8.6 ResourceMappingProvider
 
@@ -666,6 +929,8 @@ public record ResourceMapping(
 ) {}
 ```
 
+ResourceMapping 数据不是实时推断数据，而是预置的服务资源映射数据，必须存储在 MySQL 中，由 `ResourceMappingProvider` 从数据库读取。未来任务：开放资源映射的增删改查接口，支持运维或平台侧维护 `serviceName + cluster -> DB/DCS/MQ` 映射关系。
+
 ## 9. 规则预分析设计
 
 规则预分析负责产生确定性证据，降低 LLM 幻觉概率。
@@ -673,7 +938,7 @@ public record ResourceMapping(
 ### 9.1 通用规则
 
 1. 请求量规模判断：前置告警系统已经完成过滤，本系统收到告警后必须完整分析，不因请求量低跳过、忽略或判定为误报。请求量只用于判断影响范围，例如请求量较小时可以在结论中提示“暂不表现为大范围故障”。
-2. 相比基线突增：当前失败率或时延超过基线 P90 的 `baselineMultiplier`，默认 2 倍。
+2. 相比基线突增：当前失败率或时延超过前一天同时间段基线 P99 的 `baselineMultiplier`，默认 2 倍。
 3. 单实例异常：某实例 CPU、内存、GC、错误率或时延显著高于其他实例。
 4. 容器资源异常：CPU > 80%、内存 > 85%、FullGC > 0 或 YoungGC 突增。
 5. 实例状态异常：启动中或启动失败实例数量 > 0。
@@ -695,7 +960,7 @@ public interface MetricAnomalyDetector {
 异常判断优先级：
 
 1. 明确阈值，例如 CPU > 80%。
-2. 与历史基线比，例如当前值 > 基线 P90 * 2。
+2. 与历史基线比，例如当前值 > 前一天同时间段基线 P99 * 2。
 3. 与多实例横向比，例如单实例值 > 实例中位数 * 2 且超过绝对阈值。
 4. 趋势变化，例如告警前 5 分钟斜率明显上升。
 
@@ -716,13 +981,13 @@ RPC 接口日志中 `success=false` 占比高，导致成功率低于阈值。�
 默认采集：
 
 1. 告警接口日志：按 `serviceName + interfaceName + alarmWindow` 查询，limit 默认 1000。
-2. 失败样本 traceId：从失败日志中按 errorCode、uid、latency 分层采样，默认最多 20 个 trace。
+2. 失败样本 traceId：从失败日志中按 errorCode、uid、latency 分层采样，数量由 `max-trace-sample-size` 控制。
 3. Trace 链路接口日志：对采样 traceId 查询全链路接口日志。
 4. 当前服务 WARN/ERROR 运行日志：按 traceId + serviceName 查询。
 5. 容器指标：CPU、内存、GC、实例状态、CSE 使用率。
 6. 资源映射：数据库、DCS、MQ 实例。
 7. 数据库、DCS、MQ 指标：只采集当前服务映射资源在告警窗口内的数据。
-8. 基线数据：同接口最近 7 天同时间段请求量、失败率、常见 errorCode。
+8. 基线数据：同接口前一天同时间段请求量、失败率、常见 errorCode。
 
 ### 10.3 规则预分析
 
@@ -745,25 +1010,26 @@ if requestCount < limitedImpactRequestThreshold:
 2. 每个 errorCode 的失败次数、占比、uid 数、trace 数。
 3. errorCode 是否在已屏蔽列表。
 4. errorCode 是否为历史常见 errorCode。
-5. errorCode 的错误描述样例。
+5. 每个 errorCode 对应的 errorMsg 样例。
 
 判断：
 
 ```text
-if topErrorCodeShare >= 0.8 and errorCode looks like business validation:
+if topErrorCodeShare >= 0.8 and related errorMsg looks like business validation:
     add finding BUSINESS_ERROR_CODE_NOT_MASKED
 ```
 
 业务校验错误特征：
 
-1. 错误描述包含“参数错误”、“资格不满足”、“活动结束”、“库存不足”、“重复领取”、“用户状态不满足”等业务语义。
-2. 同一 uid 或少量 uid 重复触发。
-3. Trace 中无明显下游异常，当前服务运行日志无 ERROR。
-4. 历史基线中该 errorCode 长期存在。
+1. errorCode 本身只是数字和字母组合，不携带业务语义；必须根据同 errorCode 对应的 errorMsg 判断是否属于可屏蔽的业务校验失败。
+2. errorMsg 包含“参数错误”、“资格不满足”、“活动结束”、“库存不足”、“重复领取”、“用户状态不满足”等业务语义。
+3. 同一 uid 或少量 uid 重复触发。
+4. Trace 中无明显下游异常，当前服务运行日志无 ERROR。
+5. 前一天基线中该 errorCode 长期存在。
 
 系统异常错误特征：
 
-1. 错误描述包含 timeout、connection refused、NPE、SQL、Redis、MQ、circuit breaker 等。
+1. errorMsg 包含 timeout、connection refused、NPE、SQL、Redis、MQ、circuit breaker 等。
 2. Trace 中出现下游失败。
 3. 当前服务或下游服务有 ERROR 日志。
 4. 同时出现容器、数据库、DCS、MQ 指标异常。
@@ -776,7 +1042,7 @@ if topErrorCodeShare >= 0.8 and errorCode looks like business validation:
 topUidShare = top uid failure count / total failure count
 ```
 
-如果失败集中在极少数 uid，且 errorCode 为业务语义，则业务校验失败或非系统故障的可能性增加，但仍需继续结合 trace、运行日志和资源指标完成分析。
+如果失败集中在极少数 uid，且 errorMsg 为业务语义，则业务校验失败或非系统故障的可能性增加，但仍需继续结合 trace、运行日志和资源指标完成分析。
 
 #### 10.3.4 Trace 下游失败分析
 
@@ -811,8 +1077,8 @@ topUidShare = top uid failure count / total failure count
     "failRate": 1.0
   },
   "baseline": {
-    "requestCountP90": 120,
-    "failRateP90": 0.02,
+    "requestCountP99": 120,
+    "failRateP99": 0.02,
     "commonErrorCodes": ["BUSINESS_VALIDATE_FAILED"]
   },
   "errorDistribution": [
@@ -821,12 +1087,12 @@ topUidShare = top uid failure count / total failure count
       "count": 3,
       "share": 1.0,
       "uidCount": 2,
-      "sampleMessages": ["user not eligible"]
+      "sampleErrorMsgs": ["user not eligible"]
     }
   ],
   "uidDistribution": [
     {
-      "uidHash": "u_xxx",
+      "uid": "123456789",
       "count": 2,
       "share": 0.67
     }
@@ -858,7 +1124,7 @@ topUidShare = top uid failure count / total failure count
 1. 是否疑似真实故障。
 2. 是否疑似业务 errorCode 未屏蔽。
 3. 当前请求量是否说明影响范围较小，但不能将其作为跳过分析的理由。
-4. Top errorCode 和样例错误描述。
+4. Top errorCode 和样例 errorMsg，屏蔽建议必须基于 errorMsg 判断。
 5. 失败是否集中在少量 uid。
 6. 是否出现下游失败。
 7. 是否存在容器、数据库、DCS、MQ 指标异常。
@@ -888,13 +1154,13 @@ public class RpcLatencyAnalysisStrategy implements AnalysisStrategy
 默认采集：
 
 1. 告警接口日志：按 `serviceName + interfaceName + alarmWindow` 查询，limit 默认 2000。
-2. 慢请求样本：按 latencyMs 倒序选取 Top 20 traceId。
+2. 慢请求样本：按 latencyMs 倒序选取 traceId，数量由 `max-slow-trace-sample-size` 控制。
 3. 正常请求样本：选取接近 P50 的 5 个 traceId，用于对比。
 4. Trace 链路接口日志：查询慢请求和正常请求的全链路接口日志。
 5. 当前服务 WARN/ERROR 运行日志：按慢请求 traceId 查询。
 6. 容器指标：CPU、内存、GC、实例状态、CSE 使用率。
 7. 数据库、DCS、MQ 指标。
-8. 基线数据：同接口最近 7 天同时间段平均时延、P99、请求量。
+8. 基线数据：同接口前一天同时间段平均时延、P99、请求量。
 
 ### 11.3 规则预分析
 
@@ -978,7 +1244,7 @@ if root span latency is high but child span total latency is low:
 对比基线：
 
 ```text
-if currentRequestCount > baselineRequestCountP90 * 2:
+if currentRequestCount > baselineRequestCountP99 * 2:
     add finding TRAFFIC_SPIKE
 ```
 
@@ -998,9 +1264,9 @@ if currentRequestCount > baselineRequestCountP90 * 2:
     "avgLatencyMs": 3067
   },
   "baseline": {
-    "avgLatencyP90Ms": 800,
-    "p99LatencyP90Ms": 1800,
-    "requestCountP90": 60
+    "avgLatencyP99Ms": 800,
+    "p99LatencyP99Ms": 1800,
+    "requestCountP99": 60
   },
   "latencyDistribution": {
     "avgMs": 3067,
@@ -1037,7 +1303,7 @@ if currentRequestCount > baselineRequestCountP90 * 2:
       "resourceId": "dcs_xxx",
       "metric": "requestP99Latency",
       "value": 1200,
-      "baselineP90": 100,
+      "baselineP99": 100,
       "severity": "HIGH"
     }
   ],
@@ -1074,7 +1340,7 @@ LLM 可以做：
 1. 综合多源证据形成根因假设。
 2. 将技术证据转化为值班人员可读结论。
 3. 给出排查优先级。
-4. 判断业务 errorCode 未屏蔽的可能性。
+4. 根据 errorMsg 判断业务 errorCode 未屏蔽的可能性。
 5. 判断多项异常之间的关联性。
 
 LLM 不可以做：
@@ -1152,7 +1418,7 @@ RpcLatencyPromptBuilder
 2. 给出最多 5 个根因假设，并按置信度降序排列。
 3. 每个根因假设必须引用 evidenceIds。
 4. 给出可执行的人工排查建议，但不能建议系统已经自动执行任何动作。
-5. 对错误率告警，需要特别判断是否可能是业务 errorCode 未屏蔽；请求量较小时只能说明影响范围可能有限，不能判定为误报或跳过分析。
+5. 对错误率告警，需要特别根据 errorMsg 判断是否可能是业务 errorCode 未屏蔽；请求量较小时只能说明影响范围可能有限，不能判定为误报或跳过分析。
 6. 对时延告警，需要特别判断慢点在当前服务、下游 RPC、数据库、DCS、MQ、容器资源还是 GC。
 
 输出必须是合法 JSON，必须符合给定 schema。
@@ -1167,8 +1433,8 @@ RpcLatencyPromptBuilder
 分析重点：
 1. 是否为真实系统故障。
 2. 请求量规模是否说明当前告警暂不表现为大范围故障。
-3. 是否为业务校验 errorCode 未屏蔽。
-4. 失败是否集中在某个 errorCode、少量 uid 或少量 trace。
+3. 是否为业务校验 errorCode 未屏蔽，判断依据必须来自 errorMsg，而不是 errorCode 字面值。
+4. 失败是否集中在某个 errorCode、某类 errorMsg、少量 uid 或少量 trace。
 5. 是否存在下游 RPC、数据库、DCS、MQ 或容器资源异常。
 6. 给出人工排查建议和 errorCode 屏蔽建议，但不要执行任何动作。
 
@@ -1330,16 +1596,18 @@ RpcLatencyPromptBuilder
 规则：
 
 1. 原始接口日志不全量送入 LLM，只送聚合结果和代表性样本。
-2. errorCode 最多 Top 10。
-3. uid 分布最多 Top 10，uid 使用脱敏值。
-4. 慢 trace 最多 20 条。
+2. errorCode 最多保留 `max-error-code-size` 条，同时保留每个 errorCode 对应的代表性 errorMsg。
+3. uid 分布最多保留 `max-uid-size` 条。按照公司规定 uid 不属于敏感数据，无需脱敏，但仍不应输出与分析无关的用户资料。
+4. 慢 trace 最多保留 `max-slow-trace-sample-size` 条，该数量必须配置化。
 5. 每条 trace 只保留关键 span：根 span、最慢 span、失败 span、与告警服务相关 span。
 6. 运行日志最多 50 条，先按 ERROR、WARN 排序，再按 trace 相关性排序。
-7. 每条运行日志 message 最多截断 500 字符。
+7. 每条运行日志 message 最多截断 `runtime-log-message-max-chars` 字符，该长度必须配置化。
 8. 指标只保留告警窗口、基线、异常点、峰值和趋势，不传完整高频时间序列。
 9. 每条证据生成稳定 evidenceId，例如 `metric.container.cpu.max.1`、`trace.slow.3`。
 
 ### 12.10 LLM 失败降级
+
+如果配置 `aiops.llm.enabled=false`，系统不应进入 `LLM_ANALYZING`，而是直接使用规则分析结果生成最终结论：`analysisMode=RULE_BASED_ONLY`、`degraded=false`、`llmUsed=false`、`llmStatus=DISABLED`。
 
 降级场景：
 
@@ -1402,15 +1670,15 @@ public record LlmFailure(
   "degradedReason": "LLM 调用超时，已使用规则降级策略生成结论。",
   "llmUsed": false,
   "llmStatus": "TIMEOUT",
-  "summary": "【规则降级分析】接口错误率升高，失败集中在单一业务 errorCode，当前未发现容器或中间件异常。",
+  "summary": "【规则降级分析】接口错误率升高，失败集中在单一 errorCode，相关 errorMsg 呈业务校验语义，当前未发现容器或中间件异常。",
   "rootCauses": [
     {
       "causeType": "BUSINESS_ERROR_CODE_NOT_MASKED",
       "source": "RULE_ENGINE",
       "confidence": 0.72,
       "evidenceIds": ["error.top.1", "trace.failure.1"],
-      "description": "失败集中在业务语义 errorCode，疑似业务校验失败未屏蔽。",
-      "reasoning": "Top errorCode 占比超过 80%，且 trace 和资源指标未显示系统异常。"
+      "description": "失败集中在单一 errorCode，相关 errorMsg 呈业务校验语义，疑似业务校验失败未屏蔽。",
+      "reasoning": "Top errorCode 占比超过 80%，同 errorCode 的 errorMsg 匹配业务校验关键词，且 trace 和资源指标未显示系统异常。"
     }
   ]
 }
@@ -1440,7 +1708,7 @@ score < 20  -> confidence = 0.20
 
 | 根因类型 | 加分条件 |
 | --- | --- |
-| `BUSINESS_ERROR_CODE_NOT_MASKED` | Top errorCode 占比 >= 80% 加 30；错误描述匹配业务校验关键词加 25；失败集中在少量 uid 加 10；trace 无下游失败加 15；资源指标无异常加 10 |
+| `BUSINESS_ERROR_CODE_NOT_MASKED` | Top errorCode 占比 >= 80% 加 30；同 errorCode 的 errorMsg 匹配业务校验关键词加 25；失败集中在少量 uid 加 10；trace 无下游失败加 15；资源指标无异常加 10 |
 | `DOWNSTREAM_RPC_FAILURE` | 多个失败 trace 的首个失败 span 指向同一下游接口加 35；下游接口 success=false 加 25；下游错误码与当前错误码相关加 10；下游运行日志存在 ERROR 加 15 |
 | `DATABASE_RESOURCE_PRESSURE` | DB CPU/连接数/锁等待/写时延异常加 20；慢 SQL 或慢日志增加加 25；trace 或运行日志出现 SQL/DB 关键词加 20 |
 | `DCS_LATENCY_OR_FAILURE` | DCS 客户端失败次数上升加 25；DCS P99 或平均时延异常加 20；运行日志出现 Redis/DCS/cache timeout 加 20 |
@@ -1450,7 +1718,7 @@ score < 20  -> confidence = 0.20
 
 错误率降级 summary 生成规则：
 
-1. 如果最高根因为业务 errorCode：说明“疑似业务校验失败未屏蔽”，并附 Top errorCode。
+1. 如果最高根因为业务 errorCode：说明“疑似业务校验失败未屏蔽”，并附 Top errorCode 和代表性 errorMsg。
 2. 如果最高根因为下游失败：说明“失败可能由下游接口返回失败传导”，并附下游 service/interface。
 3. 如果资源类根因分数最高：说明“当前服务或依赖资源存在异常，可能导致接口失败”。
 4. 如果只有 `LOW_TRAFFIC_LIMITED_IMPACT` 分数较高：说明“当前请求量较小，暂不表现为大范围故障，但仍需确认失败原因”。
@@ -1468,7 +1736,7 @@ score < 20  -> confidence = 0.20
 | `CONTAINER_MEMORY_PRESSURE` | 内存使用率高加 20；内存持续上升加 10；伴随 GC 异常加 15 |
 | `GC_PRESSURE` | FullGC > 0 加 35；YoungGC 突增加 15；GC 时间窗口与慢请求重合加 15 |
 | `INSTANCE_STARTING_OR_FAILED` | 启动中或启动失败实例数量 > 0 加 30；异常实例与慢请求实例重合加 20 |
-| `TRAFFIC_SPIKE` | 当前请求量 > 基线 P90 * 2 加 25；同时 CPU/CSE/下游耗时升高加 20 |
+| `TRAFFIC_SPIKE` | 当前请求量 > 前一天同时间段基线 P99 * 2 加 25；同时 CPU/CSE/下游耗时升高加 20 |
 
 时延降级 summary 生成规则：
 
@@ -1512,169 +1780,257 @@ ruleEngineVersion = "fallback-rules-v1"
 
 ```sql
 CREATE TABLE aiops_alert_event (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    alert_id VARCHAR(128) NOT NULL,
-    category VARCHAR(64) NOT NULL,
-    raw_category VARCHAR(128),
-    status VARCHAR(64),
-    severity VARCHAR(64),
-    service_name VARCHAR(256),
-    interface_name VARCHAR(512),
-    cluster_name VARCHAR(128),
-    site VARCHAR(128),
-    tenant VARCHAR(128),
-    application_name VARCHAR(128),
-    alert_name VARCHAR(512),
-    metric_name VARCHAR(256),
-    metric_occur_time DATETIME(3),
-    received_at DATETIME(3) NOT NULL,
-    trigger_values_json JSON,
-    raw_text MEDIUMTEXT NOT NULL,
-    created_at DATETIME(3) NOT NULL,
-    updated_at DATETIME(3) NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    alert_id VARCHAR(128) NOT NULL COMMENT '外部告警ID，例如 WiseEye Alert ID',
+    category VARCHAR(64) NOT NULL COMMENT '系统识别后的告警类型',
+    raw_category VARCHAR(128) COMMENT '原始告警Category字段',
+    status VARCHAR(64) COMMENT '原始告警状态，例如 OPEN/CLEAR',
+    severity VARCHAR(64) COMMENT '原始告警级别',
+    service_name VARCHAR(256) COMMENT '告警服务名',
+    interface_name VARCHAR(512) COMMENT '告警接口名',
+    cluster_name VARCHAR(128) COMMENT '集群名',
+    site VARCHAR(128) COMMENT '站点',
+    tenant VARCHAR(128) COMMENT '租户',
+    application_name VARCHAR(128) COMMENT '应用名',
+    alert_name VARCHAR(512) COMMENT '告警名称',
+    metric_name VARCHAR(256) COMMENT '指标名',
+    metric_occur_time DATETIME(3) COMMENT '指标触发时间，优先取Details中的发生时间',
+    received_at DATETIME(3) NOT NULL COMMENT '本系统收到告警的时间',
+    trigger_values_json JSON COMMENT '结构化触发值，对应AlertTriggerValues',
+    raw_text MEDIUMTEXT NOT NULL COMMENT '原始告警全文',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
+    updated_at DATETIME(3) NOT NULL COMMENT '更新时间',
     UNIQUE KEY uk_alert_id (alert_id),
-    KEY idx_service_interface_time (service_name, interface_name, metric_occur_time),
-    KEY idx_category_time (category, metric_occur_time)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    KEY idx_service_interface_time (service_name, interface_name(255), metric_occur_time),
+    KEY idx_cluster_category_time (cluster_name, category, metric_occur_time),
+    KEY idx_metric_time (metric_name, metric_occur_time),
+    KEY idx_received_at (received_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='告警事件表，保存Webhook原始告警和解析后的结构化字段';
 ```
 
 ### 13.2 aiops_analysis_task
 
 ```sql
 CREATE TABLE aiops_analysis_task (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    task_id VARCHAR(128) NOT NULL,
-    alert_id VARCHAR(128) NOT NULL,
-    category VARCHAR(64) NOT NULL,
-    dedupe_key VARCHAR(1024) NOT NULL,
-    task_status VARCHAR(64) NOT NULL,
-    failure_reason TEXT,
-    created_at DATETIME(3) NOT NULL,
-    started_at DATETIME(3),
-    finished_at DATETIME(3),
-    updated_at DATETIME(3) NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
+    alert_id VARCHAR(128) NOT NULL COMMENT '关联告警ID',
+    category VARCHAR(64) NOT NULL COMMENT '告警类型',
+    dedupe_key VARCHAR(1024) NOT NULL COMMENT '去重键：category|serviceName|interfaceName|cluster',
+    task_status VARCHAR(64) NOT NULL COMMENT 'AnalysisJobStatus状态机状态',
+    current_step VARCHAR(128) COMMENT '当前执行步骤，例如 collect_provider.metric',
+    status_reason TEXT COMMENT '当前状态说明，记录等待、降级或失败原因',
+    retry_count INT NOT NULL DEFAULT 0 COMMENT '任务级重试次数',
+    state_version BIGINT NOT NULL DEFAULT 0 COMMENT '状态版本号，用于乐观锁更新',
+    failure_reason TEXT COMMENT '失败原因',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
+    started_at DATETIME(3) COMMENT '开始执行时间',
+    finished_at DATETIME(3) COMMENT '结束时间',
+    updated_at DATETIME(3) NOT NULL COMMENT '更新时间',
     UNIQUE KEY uk_task_id (task_id),
     KEY idx_alert_id (alert_id),
-    KEY idx_dedupe_status_time (dedupe_key(255), task_status, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    KEY idx_status_created_at (task_status, created_at),
+    KEY idx_dedupe_status_time (dedupe_key(255), task_status, created_at),
+    KEY idx_dedupe_created_at (dedupe_key(255), created_at),
+    KEY idx_category_status_time (category, task_status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分析任务表，使用显式状态机管理AnalysisJob生命周期';
 ```
 
 ### 13.3 aiops_analysis_result
 
 ```sql
 CREATE TABLE aiops_analysis_result (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    task_id VARCHAR(128) NOT NULL,
-    alert_id VARCHAR(128) NOT NULL,
-    category VARCHAR(64) NOT NULL,
-    analysis_mode VARCHAR(64) NOT NULL,
-    summary TEXT NOT NULL,
-    impact_level VARCHAR(64),
-    impact_description TEXT,
-    overall_confidence DECIMAL(5,4),
-    llm_used TINYINT(1) NOT NULL,
-    llm_status VARCHAR(64),
-    degraded TINYINT(1) NOT NULL DEFAULT 0,
-    degraded_reason TEXT,
-    rule_engine_version VARCHAR(128),
-    result_json JSON NOT NULL,
-    generated_at DATETIME(3) NOT NULL,
-    created_at DATETIME(3) NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
+    alert_id VARCHAR(128) NOT NULL COMMENT '告警ID',
+    category VARCHAR(64) NOT NULL COMMENT '告警类型',
+    analysis_mode VARCHAR(64) NOT NULL COMMENT 'LLM_ASSISTED/RULE_BASED_DEGRADED/RULE_BASED_ONLY',
+    summary TEXT NOT NULL COMMENT '分析摘要',
+    impact_level VARCHAR(64) COMMENT '影响等级 LOW/MEDIUM/HIGH/UNKNOWN',
+    impact_description TEXT COMMENT '影响说明',
+    overall_confidence DECIMAL(5,4) COMMENT '整体置信度，0到1',
+    llm_used TINYINT(1) NOT NULL COMMENT '是否使用LLM',
+    llm_status VARCHAR(64) COMMENT 'LLM调用状态',
+    degraded TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为降级结果',
+    degraded_by_provider_failure TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否因Provider失败导致降级或降低置信度',
+    degraded_reason TEXT COMMENT '降级原因',
+    rule_engine_version VARCHAR(128) COMMENT '规则降级策略版本',
+    result_json JSON NOT NULL COMMENT '完整分析结果JSON',
+    generated_at DATETIME(3) NOT NULL COMMENT '结果生成时间',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
     UNIQUE KEY uk_task_id (task_id),
     KEY idx_alert_id (alert_id),
+    KEY idx_alert_category (alert_id, category),
     KEY idx_analysis_mode_generated_at (analysis_mode, generated_at),
-    KEY idx_category_generated_at (category, generated_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    KEY idx_category_generated_at (category, generated_at),
+    KEY idx_generated_at (generated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分析结果表，保存面向接口和IM输出的最终结论';
 ```
 
 ### 13.4 aiops_evidence_bundle
 
 ```sql
 CREATE TABLE aiops_evidence_bundle (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    task_id VARCHAR(128) NOT NULL,
-    alert_id VARCHAR(128) NOT NULL,
-    evidence_type VARCHAR(64) NOT NULL,
-    evidence_json JSON NOT NULL,
-    expire_at DATETIME(3) NOT NULL,
-    created_at DATETIME(3) NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
+    alert_id VARCHAR(128) NOT NULL COMMENT '告警ID',
+    evidence_type VARCHAR(64) NOT NULL COMMENT '证据类型，例如 raw/compressed/rule',
+    evidence_json JSON NOT NULL COMMENT '证据包JSON',
+    expire_at DATETIME(3) NOT NULL COMMENT '过期清理时间',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
     KEY idx_task_id (task_id),
     KEY idx_alert_id (alert_id),
+    KEY idx_task_evidence_type (task_id, evidence_type),
     KEY idx_expire_at (expire_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='证据包表，保存原始证据、压缩证据和规则证据';
 ```
 
 `expire_at` 默认 `created_at + 30 days`。
 
-### 13.5 aiops_llm_call_log
+### 13.5 aiops_provider_call_log
+
+```sql
+CREATE TABLE aiops_provider_call_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
+    alert_id VARCHAR(128) NOT NULL COMMENT '告警ID',
+    provider_name VARCHAR(128) NOT NULL COMMENT 'Provider名称',
+    provider_status VARCHAR(64) NOT NULL COMMENT 'ProviderStatus状态',
+    critical TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否关键Provider',
+    latency_ms BIGINT COMMENT '调用耗时毫秒',
+    error_code VARCHAR(128) COMMENT '错误码',
+    error_message TEXT COMMENT '错误信息',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
+    KEY idx_task_id (task_id),
+    KEY idx_alert_id (alert_id),
+    KEY idx_provider_status_time (provider_name, provider_status, created_at),
+    KEY idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Provider调用日志表，用于记录数据源调用失败、超时和耗时';
+```
+
+### 13.6 aiops_llm_call_log
 
 ```sql
 CREATE TABLE aiops_llm_call_log (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    task_id VARCHAR(128) NOT NULL,
-    alert_id VARCHAR(128) NOT NULL,
-    provider VARCHAR(128),
-    model_name VARCHAR(128),
-    request_json JSON,
-    response_text MEDIUMTEXT,
-    input_tokens INT,
-    output_tokens INT,
-    latency_ms BIGINT,
-    call_status VARCHAR(64) NOT NULL,
-    error_message TEXT,
-    expire_at DATETIME(3) NOT NULL,
-    created_at DATETIME(3) NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
+    alert_id VARCHAR(128) NOT NULL COMMENT '告警ID',
+    provider VARCHAR(128) COMMENT 'LLM供应方',
+    model_name VARCHAR(128) COMMENT '模型名称',
+    request_json JSON COMMENT 'LLM请求JSON',
+    response_text MEDIUMTEXT COMMENT 'LLM原始响应文本',
+    input_tokens INT COMMENT '输入token数',
+    output_tokens INT COMMENT '输出token数',
+    latency_ms BIGINT COMMENT '调用耗时毫秒',
+    call_status VARCHAR(64) NOT NULL COMMENT '调用状态 SUCCESS/TIMEOUT/FAILED等',
+    error_message TEXT COMMENT '错误信息',
+    expire_at DATETIME(3) NOT NULL COMMENT '过期清理时间',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
     KEY idx_task_id (task_id),
     KEY idx_alert_id (alert_id),
+    KEY idx_call_status_created_at (call_status, created_at),
     KEY idx_expire_at (expire_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='LLM调用日志表，用于审计、排障和成本统计';
 ```
 
-### 13.6 aiops_duplicate_alert_link
+### 13.7 aiops_duplicate_alert_link
 
 ```sql
 CREATE TABLE aiops_duplicate_alert_link (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    source_alert_id VARCHAR(128) NOT NULL,
-    target_task_id VARCHAR(128) NOT NULL,
-    dedupe_key VARCHAR(1024) NOT NULL,
-    created_at DATETIME(3) NOT NULL,
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    source_alert_id VARCHAR(128) NOT NULL COMMENT '被合并的告警ID',
+    target_task_id VARCHAR(128) NOT NULL COMMENT '命中的已有分析任务ID',
+    dedupe_key VARCHAR(1024) NOT NULL COMMENT '去重键',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
     KEY idx_source_alert_id (source_alert_id),
     KEY idx_target_task_id (target_task_id),
     KEY idx_dedupe_key_time (dedupe_key(255), created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='重复告警关联表，记录5分钟去重合并关系';
+```
+
+### 13.8 aiops_resource_mapping
+
+```sql
+CREATE TABLE aiops_resource_mapping (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    service_name VARCHAR(256) NOT NULL COMMENT '服务名',
+    cluster_name VARCHAR(128) NOT NULL COMMENT '集群名',
+    resource_type VARCHAR(64) NOT NULL COMMENT '资源类型：DATABASE/DCS/MQ',
+    resource_id VARCHAR(256) NOT NULL COMMENT '资源实例ID',
+    resource_name VARCHAR(256) COMMENT '资源实例名称',
+    enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+    metadata_json JSON COMMENT '扩展信息，例如所属环境、备注、连接标识',
+    created_by VARCHAR(128) COMMENT '创建人',
+    updated_by VARCHAR(128) COMMENT '更新人',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
+    updated_at DATETIME(3) NOT NULL COMMENT '更新时间',
+    UNIQUE KEY uk_service_cluster_resource (service_name, cluster_name, resource_type, resource_id),
+    KEY idx_service_cluster_enabled (service_name, cluster_name, enabled),
+    KEY idx_resource_type_id (resource_type, resource_id),
+    KEY idx_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='服务资源映射表，预置service+cluster到DB/DCS/MQ实例的关系';
+```
+
+说明：一期数据通过初始化脚本或人工导入预置。未来任务是开放该表的增删改查接口，并增加操作审计。
+
+### 13.9 aiops_analysis_job_state_log
+
+```sql
+CREATE TABLE aiops_analysis_job_state_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '自增主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
+    alert_id VARCHAR(128) NOT NULL COMMENT '告警ID',
+    from_status VARCHAR(64) COMMENT '变更前状态',
+    to_status VARCHAR(64) NOT NULL COMMENT '变更后状态',
+    step_name VARCHAR(128) COMMENT '状态对应的执行步骤',
+    reason TEXT COMMENT '状态变更原因',
+    state_version BIGINT NOT NULL COMMENT '变更后的状态版本',
+    created_at DATETIME(3) NOT NULL COMMENT '创建时间',
+    KEY idx_task_created_at (task_id, created_at),
+    KEY idx_alert_id (alert_id),
+    KEY idx_to_status_created_at (to_status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分析任务状态流转日志，用于审计、排障和耗时统计';
 ```
 
 ## 14. 分析任务生命周期
 
-```text
-1. Webhook 收到原始告警。
-2. AlertParser 解析结构化字段。
-3. AlertClassifier 识别告警类别。
-4. 保存 aiops_alert_event。
-5. 计算 dedupeKey。
-6. AlertDeduplicationService 检查 5 分钟内是否已有任务。
-7. 如果重复，写 aiops_duplicate_alert_link，返回已有 taskId。
-8. 如果不重复，创建 aiops_analysis_task，状态 PENDING。
-9. 异步线程或任务队列消费任务。
-10. 状态改为 RUNNING。
-11. AnalysisStrategyRegistry 获取对应策略。
-12. 策略构建 AnalysisContext。
-13. 调用 Provider 获取指标、日志、Trace、基线、资源映射。
-14. 执行规则预分析。
-15. EvidenceCompressor 生成 CompressedEvidence。
-16. 保存 evidence bundle。
-17. LlmAnalysisService 调用 LLM。
-18. 校验 LLM 输出。
-19. 如果 LLM 成功，合并规则和 LLM 结果，`analysisMode=LLM_ASSISTED`。
-20. 如果 LLM 不可用、超时或输出校验失败，调用 `RuleBasedFallbackAnalyzer` 生成规则降级结果，`analysisMode=RULE_BASED_DEGRADED`，`degraded=true`。
-21. 保存 aiops_analysis_result。
-22. 状态改为 SUCCESS 或 DEGRADED_SUCCESS。
-```
+AnalysisJob 必须通过显式状态机推进。每次状态切换都要：
+
+1. 更新 `aiops_analysis_task.task_status/current_step/status_reason/state_version/updated_at`。
+2. 插入 `aiops_analysis_job_state_log`。
+3. 使用 `task_id + state_version` 乐观锁更新，避免异步任务重复执行导致状态回退。
+
+状态流转：
+
+Webhook 同步接入阶段先完成告警解析、分类、保存 `aiops_alert_event`、计算 dedupeKey 和创建 `aiops_analysis_task`。只有任务创建成功后，AnalysisJob 才进入以下状态机。
+
+| 顺序 | 状态 | 执行动作 | 成功后 | 失败后 |
+| --- | --- | --- | --- | --- |
+| 1 | `PENDING` | 异步执行器领取任务，初始化执行上下文 | `RUNNING` | `FAILED` |
+| 2 | `RUNNING` | 初始化 AnalysisContext，选择策略 | `COLLECTING_EVIDENCE` | `FAILED` |
+| 3 | `COLLECTING_EVIDENCE` | 并行调用 Provider，收集指标、日志、Trace、基线、资源映射 | `RULE_ANALYZING` | Provider 失败按 8.0 的默认口径处理；能生成降级结果时进入后续状态，不能解析告警关键字段才 `FAILED` |
+| 4 | `RULE_ANALYZING` | 执行错误率/时延规则预分析 | `COMPRESSING_EVIDENCE` | `FAILED` |
+| 5 | `COMPRESSING_EVIDENCE` | 生成压缩证据包并保存 evidence bundle | LLM 启用时进入 `LLM_ANALYZING`，LLM 关闭时进入 `GENERATING_RESULT` 并生成 `RULE_BASED_ONLY` 结果 | `FAILED` |
+| 6 | `LLM_ANALYZING` | 调用 LLM，校验 JSON 和 evidenceId | `GENERATING_RESULT` | `RULE_FALLBACK_ANALYZING` |
+| 7 | `RULE_FALLBACK_ANALYZING` | 执行规则降级策略 | `GENERATING_RESULT` | `FAILED` |
+| 8 | `GENERATING_RESULT` | 合并结论、保存结果 | `SUCCESS` 或 `DEGRADED_SUCCESS` | `FAILED` |
+
+去重和历史参考：
+
+1. 如果 5 分钟内命中相同 dedupeKey 的任务，新告警不创建新的执行流程，写入 `aiops_duplicate_alert_link`，返回已有 taskId。
+2. 如果 5 分钟外存在历史已完成结果，不影响本次状态机执行，只在结果中附加 `historicalReference`。
+
+Provider 状态处理：
+
+1. 每个 Provider 调用都要生成 `ProviderResult`，记录成功、失败、超时或跳过。
+2. 每个 Provider 调用结果写入 `aiops_provider_call_log`，用于定位数据源慢、超时和失败。
+3. 非关键 Provider 失败时，任务继续执行，但最终状态应为 `DEGRADED_SUCCESS`，并在结果中标注 `degradedByProviderFailure=true`。
+4. 关键 Provider 失败时，按 8.0 的默认口径生成规则降级结果；只有无法解析告警关键字段或状态机异常时，任务进入 `FAILED`。
+5. Provider 并行调用完成后再统一进入 `RULE_ANALYZING`，避免某个慢 Provider 阻塞所有无依赖数据源。
 
 失败处理：
 
-1. Provider 部分失败：记录 missingEvidence，继续分析。
+1. Provider 部分失败：记录 missingEvidence，根据 8.0 的 Provider 关键性矩阵决定继续或规则降级。
 2. 关键字段缺失：任务失败，例如无法解析 serviceName 或 interfaceName。
 3. LLM 失败：执行规则降级策略，生成带 `RULE_BASED_DEGRADED` 标记的降级分析结果，任务状态为 `DEGRADED_SUCCESS`。
 4. 未支持告警类型：任务失败或返回 `UNSUPPORTED_CATEGORY`。
@@ -1725,31 +2081,112 @@ public class AnalysisStrategyRegistry {
 ```yaml
 aiops:
   analysis:
+    # 5分钟内相同 dedupeKey 的告警合并到同一个分析任务，避免重复调用 Provider 和 LLM。
     dedupe-window: PT5M
+
+    # 5分钟外的同 dedupeKey 历史结果参考窗口；只作为值班参考，不阻止本次分析。
+    historical-reference-lookback: P1D
+
+    # 原始证据包保留天数，到期后可由定时任务清理。
     evidence-retention-days: 30
+
+    # LLM 请求和响应日志保留天数，到期后可清理以控制存储成本。
     llm-log-retention-days: 30
+
+    # 单个分析任务的目标超时时间，超过后应进入失败或降级流程。
     async-timeout: PT3M
+
+    # 只用于判断“影响范围可能有限”，不能用于过滤或跳过告警。
     limited-impact-request-threshold: 10
-    baseline-days: 7
+
+    # 基线默认取前一天同时间段，避免查询最近7天导致慢查询或无数据。
+    baseline-offset-days: 1
+
+    # 基线对比窗口长度，例如告警发生时间前后各取一段窗口。
     baseline-compare-duration: PT10M
+
+    # 单次接口日志查询最大条数。
     max-interface-log-limit: 2000
+
+    # 错误率告警中失败 trace 抽样上限。
     max-trace-sample-size: 20
+
+    # 时延告警中慢 trace 抽样上限。
+    max-slow-trace-sample-size: 20
+
+    # 运行日志最多保留条数。
     max-runtime-log-size: 50
+
+    # 每条运行日志 message 最大字符数，超出后截断再送入 LLM。
+    runtime-log-message-max-chars: 500
+
+    # errorCode 聚合 TopN 上限。
+    max-error-code-size: 10
+
+    # uid 分布 TopN 上限；uid 按公司规定不属于敏感数据，无需脱敏。
+    max-uid-size: 10
+
+  provider:
+    # Provider 单次调用超时，超过后标记 TIMEOUT。
+    timeout: PT10S
+
+    # Provider 失败后的短重试次数；重试后仍失败则进入 Provider 降级方案。
+    retry-times: 1
+
+    # Provider 短重试间隔。
+    retry-interval: PT1S
+
+    # 是否启用无依赖 Provider 并行调用。
+    parallel-enabled: true
+
+    # 非关键 Provider 失败时是否继续分析并降低置信度。
+    continue-on-non-critical-failure: true
+
   llm:
+    # 是否启用LLM。为false时直接走规则分析，analysisMode=RULE_BASED_ONLY，不视为异常降级。
+    enabled: true
+
+    # LLM 供应方适配器，可切换 openai-compatible/internal/local/mock。
     provider: openai-compatible
+
+    # 具体模型名称。
     model: default-model
+
+    # 输出随机性，告警分析建议保持低温度。
     temperature: 0.1
+
+    # LLM 最大输出 token，避免超长响应。
     max-output-tokens: 4000
+
+    # LLM 调用超时。
     timeout: PT45S
+
+    # LLM 不可用时是否启用规则降级分析。
     fallback-enabled: true
+
+    # 规则降级策略版本，写入分析结果用于回放和审计。
     fallback-rule-engine-version: fallback-rules-v1
+
   thresholds:
+    # 容器CPU高水位阈值。
     container-cpu-high: 0.80
+
+    # 容器内存高水位阈值。
     container-memory-high: 0.85
+
+    # CSE/RPC框架资源使用率高水位阈值。
     cse-usage-high: 0.80
+
+    # 数据库CPU高水位阈值。
     db-cpu-high: 0.80
+
+    # 数据库连接数使用率高水位阈值。
     db-connection-high: 0.80
+
+    # DCS CPU高水位阈值。
     dcs-cpu-high: 0.80
+
+    # DCS内存高水位阈值。
     dcs-memory-high: 0.85
 ```
 
@@ -1769,6 +2206,8 @@ aiops:
 8. LLM 输出 Schema 校验。
 9. LLM evidenceId 引用校验。
 10. RuleBasedFallbackAnalyzer 在 LLM 不可用时生成同构结果，并标注 `analysisMode=RULE_BASED_DEGRADED`。
+11. AnalysisJob 状态机合法流转和非法流转拦截。
+12. ProviderResult 聚合、并行调用和非关键 Provider 失败降级。
 
 ### 17.2 集成测试
 
@@ -1782,6 +2221,8 @@ aiops:
 6. RPC 时延 DCS P99 升高。
 7. LLM 超时降级，并返回规则降级策略生成的根因、建议和降级标记。
 8. Provider 部分失败仍能输出缺失证据说明。
+9. 5 分钟外同 dedupeKey 历史结果能作为 historicalReference 返回。
+10. ResourceMappingProvider 能从预置数据库表读取 DB/DCS/MQ 映射。
 
 ### 17.3 验收标准
 
@@ -1789,9 +2230,11 @@ aiops:
 2. 错误率样例能解析出 `ams_front`、`vmall-ams.PrizeActivityService.queryPrizeResult`、`cluster1`、`AIOps@rate`。
 3. 时延样例能解析出 `vmall_ingresscache_ica`、接口名、`cluster2`、`AIOps@delay`。
 4. 相同 dedupeKey 5 分钟内只创建一个分析任务。
-5. LLM 失败时仍能返回规则降级分析结果，且 `analysisMode=RULE_BASED_DEGRADED`、`degraded=true`、`llmUsed=false`。
-6. 所有最终结论都有 evidenceId。
-7. 不存在自动执行处置动作的代码路径。
+5. 相同 dedupeKey 5 分钟外的历史结果能返回 alertId、taskId 和摘要，且不阻止本次分析。
+6. LLM 失败时仍能返回规则降级分析结果，且 `analysisMode=RULE_BASED_DEGRADED`、`degraded=true`、`llmUsed=false`。
+7. 非关键 Provider 失败时能返回 `missingEvidence` 和 `degradedByProviderFailure=true`。
+8. 所有最终结论都有 evidenceId。
+9. 不存在自动执行处置动作的代码路径。
 
 ## 18. 开发任务拆分
 
@@ -1803,7 +2246,9 @@ aiops:
 4. 实现 AlertParser。
 5. 实现 AlertClassifier。
 6. 实现任务创建、去重、查询接口。
-7. 实现异步任务执行框架。
+7. 实现 AnalysisJob 状态机和状态流转日志。
+8. 实现异步任务执行框架。
+9. 导入预置 ResourceMapping 数据。
 
 ### 18.2 第二阶段：Provider 抽象和 Mock
 
@@ -1813,7 +2258,9 @@ aiops:
 4. 定义 RuntimeLogProvider。
 5. 定义 BaselineProvider。
 6. 定义 ResourceMappingProvider。
-7. 提供 Mock 实现用于本地开发和测试。
+7. 实现 Provider 并行调用编排和 ProviderResult 包装。
+8. 实现 Provider 调用日志和 Provider 失败降级方案。
+9. 提供 Mock 实现用于本地开发和测试。
 
 ### 18.3 第三阶段：规则分析
 
@@ -1843,8 +2290,16 @@ aiops:
 3. 适配真实 Trace 查询接口。
 4. 适配真实运行日志查询接口。
 5. 适配真实基线查询接口。
-6. 使用线上历史告警回放评估效果。
-7. 调整阈值、采样数量、Prompt 和规则权重。
+6. 适配 ResourceMapping 初始化数据导入流程。
+7. 使用线上历史告警回放评估效果。
+8. 调整阈值、采样数量、Prompt 和规则权重。
+
+### 18.6 后续任务：资源映射维护接口
+
+1. 开放 ResourceMapping 增删改查接口。
+2. 增加资源映射变更审计。
+3. 支持按 serviceName、cluster、resourceType 查询映射。
+4. 支持资源映射灰度启停，避免错误映射影响分析结果。
 
 ## 19. 系统建议
 
@@ -1857,10 +2312,11 @@ aiops:
 建立 errorCode 治理闭环：
 
 1. 自动识别疑似业务 errorCode 未屏蔽。
-2. 输出屏蔽建议，不自动修改。
-3. 人工确认后进入屏蔽配置。
-4. 记录每次建议是否被采纳。
-5. 用采纳结果优化后续规则。
+2. 屏蔽建议必须基于 errorCode 对应的 errorMsg 和 trace/资源证据，不根据 errorCode 字面值判断。
+3. 输出屏蔽建议，不自动修改。
+4. 人工确认后进入屏蔽配置。
+5. 记录每次建议是否被采纳。
+6. 用采纳结果优化后续规则。
 
 ### 19.3 Trace 能力建议
 
@@ -1898,7 +2354,7 @@ INSUFFICIENT_EVIDENCE
 
 ### 19.7 安全建议
 
-即使当前日志已脱敏，仍建议在送入 LLM 前增加二次脱敏过滤器，至少过滤手机号、邮箱、token、cookie、身份证号、银行卡号、精确地址等敏感模式。
+即使当前日志已脱敏，仍建议在送入 LLM 前增加二次脱敏过滤器，至少过滤手机号、邮箱、token、cookie、身份证号、银行卡号、精确地址等敏感模式。uid 按公司规定不属于敏感数据，可以直接进入证据包，但不应输出与告警分析无关的用户资料。
 
 ## 20. 示例最终分析结果
 
@@ -1908,13 +2364,14 @@ INSUFFICIENT_EVIDENCE
 {
   "analysisMode": "LLM_ASSISTED",
   "degraded": false,
+  "degradedByProviderFailure": false,
   "degradedReason": null,
   "llmUsed": true,
   "llmStatus": "SUCCESS",
-  "summary": "该错误率告警请求量较小，暂不表现为大范围故障；失败集中在单一 errorCode，暂未发现容器或中间件异常，疑似业务校验失败未屏蔽。",
+  "summary": "该错误率告警请求量较小，暂不表现为大范围故障；失败集中在单一 errorCode，相关 errorMsg 呈业务校验语义，暂未发现容器或中间件异常，疑似业务校验失败未屏蔽。",
   "impact": {
     "level": "LOW",
-    "description": "告警窗口请求数较低，对整体用户影响可能有限，但需要确认 errorCode 是否应纳入屏蔽。"
+    "description": "告警窗口请求数较低，对整体用户影响可能有限，但需要结合 errorMsg 确认 errorCode 是否应纳入屏蔽。"
   },
   "rootCauses": [
     {
@@ -1927,18 +2384,18 @@ INSUFFICIENT_EVIDENCE
     },
     {
       "causeType": "BUSINESS_ERROR_CODE_NOT_MASKED",
-      "description": "失败集中在业务语义 errorCode，可能属于应屏蔽但未屏蔽的业务校验失败。",
+      "description": "失败集中在单一 errorCode，相关 errorMsg 呈业务校验语义，可能属于应屏蔽但未屏蔽的业务校验失败。",
       "confidence": 0.68,
       "evidenceIds": ["error.top.1", "trace.failure.1"],
       "source": "MERGED",
-      "reasoning": "Top errorCode 占比高，未观察到下游失败和资源异常。"
+      "reasoning": "Top errorCode 占比高，代表性 errorMsg 符合业务校验语义，未观察到下游失败和资源异常。"
     }
   ],
   "recommendations": [
     {
       "priority": "P1",
       "actionType": "EVALUATE_ERROR_CODE_MASKING",
-      "description": "确认 Top errorCode 是否属于正常业务校验失败，如确认则加入错误率告警屏蔽配置。",
+      "description": "根据 Top errorCode 对应的 errorMsg 确认是否属于正常业务校验失败，如确认则加入错误率告警屏蔽配置。",
       "target": "ACTIVITY_NOT_ELIGIBLE"
     },
     {
@@ -1949,6 +2406,7 @@ INSUFFICIENT_EVIDENCE
     }
   ],
   "overallConfidence": 0.78,
+  "missingEvidence": [],
   "insufficientEvidence": []
 }
 ```
@@ -1959,6 +2417,7 @@ INSUFFICIENT_EVIDENCE
 {
   "analysisMode": "LLM_ASSISTED",
   "degraded": false,
+  "degradedByProviderFailure": false,
   "degradedReason": null,
   "llmUsed": true,
   "llmStatus": "SUCCESS",
@@ -2000,6 +2459,59 @@ INSUFFICIENT_EVIDENCE
     }
   ],
   "overallConfidence": 0.72,
+  "missingEvidence": [],
   "insufficientEvidence": ["缺少直接的标准调用树接口，当前调用关系由 spanId 和 parentSpanId 推断。"]
 }
+```
+
+## 21. 附录：原始告警示例
+
+### 21.1 RPC 接口错误率告警原文
+
+```text
+WiseEye Alarm:
+Status: OPEN
+Severity: Major
+Host: CP_all_all_sevice_failrate_over70_ams:{"servicename":"ams_front","interfacename":"vmall-ams.PrizeActivityService.queryPrizeResult","cluster":"cluster1"}
+Category: AIOps@rate
+Details: CP_all_all_sevice_failrate_over70_ams 1、告警名称：CP域服务接口错误率连续1分钟大于70%
+2、告警对象：服务名称：ams_front,接口：vmall-ams.PrizeActivityService.queryPrizeResult,集群：cluster1
+3、告警信息：请求总数=3.0,失败率=100%, 发生时间=2026-04-20T18:09:00
+4、诊断信息：chat analysis vmall-service-errors-delimit-analysis serviceName='ams_front' interfaceName='vmall-ams.PrizeActivityService.queryPrizeResult' occurTime='2026-04-20T18:09:00'AlertName: CP域服务接口错误率连续1分钟大于70%,Site: cn_product_default,MetricName: CP_all_all_sevice_failrate_over70_ams,Category: AIOps@rate
+IP Address: null
+Occur Time: 2026-04-20 18:13:40+08:00
+Clear Time: null
+Template: unknown
+Handler: mWX1336861,w00836539
+Alert ID: 521600500
+Tenant: 电商
+Application: 电商业务
+Service: VmallActivityService
+Site: cn_product_default
+```
+
+### 21.2 RPC 接口时延告警原文
+
+```text
+WiseEye Alarm:
+Status: OPEN
+Severity: Major
+Host: BP_ingresscache_service_delay_avg:{"servicename":"vmall_ingresscache_ica","interfacename":"persistent://WiseCloudDMQService/WiseCloudDMQService/MQTopic_PMS.refreshAppProduct_cluster2","cluster":"cluster2"}
+Category: AIOps@delay
+Details: BP_ingresscache_service_delay_avg
+1、告警名称：ingresscache接口平均时延超3s持续5分钟
+2、告警对象：服务名称vmall_ingresscache_ica，接口名称为persistent://WiseCloudDMQService/WiseCloudDMQService/MQTopic_PMS.refreshAppProduct_cluster2，集群：cluster2
+3、告警信息：平均时延=3067, 告警发生时间=2026-04-21T10:33:00, 请求总数=49.0
+4、诊断命令：chat analysis vmall-service-latency-delimit-analysis serviceName='vmall_ingresscache_ica' interfaceName='persistent://WiseCloudDMQService/WiseCloudDMQService/MQTopic_PMS.refreshAppProduct_cluster2' occurTime='2026-04-21T10:33:00'
+AlertName: ingresscache接口平均时延超3s持续5分钟,Site: cn_product_default,MetricName: BP_ingresscache_service_delay_avg,Category: AIOps@delay
+IP Address: null
+Occur Time: 2026-04-21 10:38:31+08:00
+Clear Time: null
+Template: unknown
+Handler: yWX1352312,y00666716
+Alert ID: 521932116
+Tenant: 电商
+Application: 电商业务
+Service: VmallOpenGWService
+Site: cn_product_default
 ```
