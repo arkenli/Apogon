@@ -1,0 +1,61 @@
+spring:
+  application:
+    name: aiops-alert-analysis
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+  datasource:
+    url: ${AIOPS_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3307/aiops_alert_analysis?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${AIOPS_DATASOURCE_USERNAME:aiops_test}
+    password: ${AIOPS_DATASOURCE_PASSWORD:aiops_test_123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+server:
+  port: ${SERVER_PORT:8080}
+
+aiops:
+  analysis:
+    dedupe-window: PT5M
+    historical-reference-lookback: P1D
+    evidence-retention-days: 30
+    llm-log-retention-days: 30
+    async-timeout: PT3M
+    limited-impact-request-threshold: 10
+    baseline-offset-days: 1
+    baseline-compare-duration: PT10M
+    max-interface-log-limit: 2000
+    max-trace-sample-size: 20
+    max-slow-trace-sample-size: 20
+    max-runtime-log-size: 50
+    runtime-log-message-max-chars: 500
+    max-error-code-size: 10
+    max-uid-size: 10
+
+  provider:
+    timeout: PT10S
+    retry-times: 1
+    retry-interval: PT1S
+    parallel-enabled: true
+    continue-on-non-critical-failure: true
+
+  llm:
+    enabled: true
+    provider: openai-compatible
+    model: default-model
+    temperature: 0.1
+    max-output-tokens: 4000
+    timeout: PT45S
+    fallback-enabled: true
+    fallback-rule-engine-version: fallback-rules-v1
+
+  thresholds:
+    container-cpu-high: 0.80
+    container-memory-high: 0.85
+    cse-usage-high: 0.80
+    db-cpu-high: 0.80
+    db-connection-high: 0.80
+    dcs-cpu-high: 0.80
+    dcs-memory-high: 0.85

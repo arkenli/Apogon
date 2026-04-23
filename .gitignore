@@ -1,4 +1,6 @@
 target/
+.local-mysql/
+LOCAL_MYSQL.md
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
