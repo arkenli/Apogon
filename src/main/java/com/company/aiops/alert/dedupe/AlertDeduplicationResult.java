@@ -1,7 +1,7 @@
 package com.company.aiops.alert.dedupe;
 
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.HistoricalReference;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.result.HistoricalReference;
 
 import java.util.Optional;
 

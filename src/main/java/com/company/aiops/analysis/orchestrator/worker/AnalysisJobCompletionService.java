@@ -1,9 +1,10 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.worker;
 
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
-import com.company.aiops.analysis.model.AnalysisMode;
-import com.company.aiops.analysis.model.AnalysisResult;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
+import com.company.aiops.analysis.orchestrator.state.AnalysisJobStateMachine;
+import com.company.aiops.analysis.result.AnalysisMode;
+import com.company.aiops.analysis.result.AnalysisResult;
 import com.company.aiops.persistence.repository.AnalysisResultRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;

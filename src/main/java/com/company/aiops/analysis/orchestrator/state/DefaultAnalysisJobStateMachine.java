@@ -1,8 +1,8 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.state;
 
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.AnalysisJobStateLog;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.job.AnalysisJobStateLog;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
 import com.company.aiops.common.exception.AiopsException;
 import com.company.aiops.common.exception.ErrorCode;
 import com.company.aiops.persistence.repository.AnalysisJobStateLogRepository;

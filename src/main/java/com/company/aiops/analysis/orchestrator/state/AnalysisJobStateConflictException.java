@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.state;
 
 /**
  * Raised when a concurrent worker has already advanced the task state version.

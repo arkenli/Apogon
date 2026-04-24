@@ -1,8 +1,8 @@
 package com.company.aiops.alert.dedupe;
 
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
-import com.company.aiops.analysis.model.HistoricalReference;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
+import com.company.aiops.analysis.result.HistoricalReference;
 import com.company.aiops.common.config.AiopsProperties;
 import com.company.aiops.persistence.repository.AnalysisResultRepository;
 import com.company.aiops.persistence.repository.AnalysisTaskRepository;

@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.job;
 
 /**
  * States defined by the analysis job state machine in the design document.

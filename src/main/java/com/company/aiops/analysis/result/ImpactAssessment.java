@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.result;
 
 /**
  * High-level impact statement that accompanies the analysis summary.

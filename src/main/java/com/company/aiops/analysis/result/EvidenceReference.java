@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.result;
 
 /**
  * Lightweight index entry that lets downstream consumers locate a concrete evidence item.

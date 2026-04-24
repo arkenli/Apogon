@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.job;
 
 import java.time.Instant;
 

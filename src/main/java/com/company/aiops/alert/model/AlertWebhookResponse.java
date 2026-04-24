@@ -1,6 +1,6 @@
 package com.company.aiops.alert.model;
 
-import com.company.aiops.analysis.model.HistoricalReference;
+import com.company.aiops.analysis.result.HistoricalReference;
 
 /**
  * Webhook 接口返回的任务受理结果。

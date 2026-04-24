@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.context;
 
 import com.company.aiops.alert.model.AlertEvent;
 import com.company.aiops.provider.model.ResourceMapping;

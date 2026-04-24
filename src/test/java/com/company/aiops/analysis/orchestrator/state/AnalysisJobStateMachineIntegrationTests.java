@@ -1,11 +1,13 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.state;
 
 import com.company.aiops.alert.model.AlertCategory;
 import com.company.aiops.alert.model.AlertEvent;
 import com.company.aiops.alert.model.AlertTriggerValues;
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.AnalysisJobStateLog;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.job.AnalysisJobStateLog;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
+import com.company.aiops.analysis.orchestrator.worker.AnalysisJobWorker;
+import com.company.aiops.analysis.orchestrator.worker.AnalysisWorkerScenario;
 import com.company.aiops.persistence.repository.AlertEventRepository;
 import com.company.aiops.persistence.repository.AnalysisJobStateLogRepository;
 import com.company.aiops.persistence.repository.AnalysisTaskRepository;

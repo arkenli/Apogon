@@ -1,6 +1,6 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.state;
 
-import com.company.aiops.analysis.model.AnalysisJobStatus;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
 
 /**
  * Raised when code attempts to bypass the lifecycle graph described in the design document.

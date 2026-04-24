@@ -1,7 +1,7 @@
 package com.company.aiops.persistence.repository;
 
-import com.company.aiops.analysis.model.AnalysisResult;
-import com.company.aiops.analysis.model.HistoricalReference;
+import com.company.aiops.analysis.result.AnalysisResult;
+import com.company.aiops.analysis.result.HistoricalReference;
 
 import java.time.Instant;
 import java.util.Optional;

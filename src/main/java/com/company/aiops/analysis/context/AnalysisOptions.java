@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.context;
 
 /**
  * Runtime limits that keep provider collection and evidence compression within configured bounds.

@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.worker;
 
 /**
  * Worker scenarios used to validate lifecycle branches before provider, rule, and LLM integrations

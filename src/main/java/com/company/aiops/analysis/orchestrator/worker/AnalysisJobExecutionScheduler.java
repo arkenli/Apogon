@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.worker;
 
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;

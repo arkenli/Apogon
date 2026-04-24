@@ -1,6 +1,6 @@
 package com.company.aiops.persistence.repository;
 
-import com.company.aiops.analysis.model.AnalysisJobStateLog;
+import com.company.aiops.analysis.job.AnalysisJobStateLog;
 
 import java.util.List;
 

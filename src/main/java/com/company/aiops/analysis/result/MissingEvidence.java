@@ -1,4 +1,4 @@
-package com.company.aiops.analysis.model;
+package com.company.aiops.analysis.result;
 
 /**
  * Captures a provider gap so degraded conclusions remain auditable.

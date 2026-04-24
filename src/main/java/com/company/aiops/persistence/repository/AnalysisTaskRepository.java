@@ -1,7 +1,7 @@
 package com.company.aiops.persistence.repository;
 
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
 
 import java.time.Instant;
 import java.util.Collection;

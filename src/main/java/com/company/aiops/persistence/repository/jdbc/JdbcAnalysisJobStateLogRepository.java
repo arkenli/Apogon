@@ -1,7 +1,7 @@
 package com.company.aiops.persistence.repository.jdbc;
 
-import com.company.aiops.analysis.model.AnalysisJobStateLog;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
+import com.company.aiops.analysis.job.AnalysisJobStateLog;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
 import com.company.aiops.persistence.repository.AnalysisJobStateLogRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;

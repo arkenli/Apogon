@@ -1,14 +1,15 @@
-package com.company.aiops.analysis.orchestrator;
+package com.company.aiops.analysis.orchestrator.worker;
 
 import com.company.aiops.alert.model.AlertEvent;
-import com.company.aiops.analysis.model.AnalysisJob;
-import com.company.aiops.analysis.model.AnalysisJobStatus;
-import com.company.aiops.analysis.model.AnalysisMode;
-import com.company.aiops.analysis.model.AnalysisResult;
-import com.company.aiops.analysis.model.EvidenceReference;
-import com.company.aiops.analysis.model.ImpactAssessment;
-import com.company.aiops.analysis.model.Recommendation;
-import com.company.aiops.analysis.model.RootCauseHypothesis;
+import com.company.aiops.analysis.job.AnalysisJob;
+import com.company.aiops.analysis.job.AnalysisJobStatus;
+import com.company.aiops.analysis.orchestrator.state.AnalysisJobStateMachine;
+import com.company.aiops.analysis.result.AnalysisMode;
+import com.company.aiops.analysis.result.AnalysisResult;
+import com.company.aiops.analysis.result.EvidenceReference;
+import com.company.aiops.analysis.result.ImpactAssessment;
+import com.company.aiops.analysis.result.Recommendation;
+import com.company.aiops.analysis.result.RootCauseHypothesis;
 import com.company.aiops.common.exception.AiopsException;
 import com.company.aiops.common.exception.ErrorCode;
 import com.company.aiops.persistence.repository.AlertEventRepository;
