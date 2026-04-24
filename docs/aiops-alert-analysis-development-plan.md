@@ -28,6 +28,14 @@
 7. 外部 Provider 一期使用 Mock/Stub，不接真实内网 HTTP。
 8. ResourceMappingProvider 一期必须读取 MySQL 预置数据。
 
+### 2.1 代码组织与注释要求
+
+1. 包结构必须按职责持续细分，不能把 `Classifier`、`Response`、`Event`、`Controller`、`Repository`、`Jdbc` 实现等长期混放在同一目录。
+2. 分包优先按“接口职责 + 运行层次”拆分，例如 `alert.controller`、`alert.parser`、`alert.classifier`、`alert.dedupe`、`alert.model`、`analysis.model`、`analysis.orchestrator`、`analysis.rule`、`provider.resource`、`provider.model`、`persistence.repository`、`persistence.repository.jdbc`、`common.json`、`common.error`。
+3. 如果某个包下已经同时出现领域模型、响应对象、编排逻辑、基础设施实现，必须在当前阶段顺手完成拆分，不能等到后续阶段再集中清理。
+4. 新增或修改代码时必须补充必要注释，至少覆盖：包级职责说明、公共类/接口/record/enum 的用途说明，以及复杂规则、状态流转、SQL 映射、降级分支等不自解释逻辑。
+5. 注释要求解释“为什么这样设计、边界是什么、输入输出含义是什么”，不要只重复代码表面语义。
+
 ## 3. 推荐开发顺序
 
 开发时严格按阶段推进。每个阶段完成后再进入下一阶段，避免在 Provider、LLM 和规则引擎之间来回返工。
@@ -40,26 +48,55 @@
 
 1. 引入 Spring Boot Web、Validation、Jackson、MySQL Driver、测试依赖。
 2. 配置 JDK 21 编译。
-3. 建立基础包结构：
+3. 建立基础包结构，并从一开始按职责拆分子包：
 
 ```text
 com.company.aiops
   alert
+    controller
+    parser
+    classifier
+    dedupe
+    model
   analysis
+    controller
+    orchestrator
+    strategy
+    rule
+    evidence
+    model
   provider
+    metric
+    log
+    trace
+    baseline
+    resource
+    model
   llm
+    client
+    prompt
+    schema
+    validator
   persistence
+    entity
+    repository
   common
+    time
+    json
+    error
 ```
 
 4. 增加 `application.yml`，写入设计文档第 16 章配置项。
 5. 增加统一异常模型和统一 API 响应模型。
+6. 为根包和关键子包补充 `package-info.java` 或等价包级说明，为核心公共类型补充基础注释。
 
 验收标准：
 
 1. 应用可以本地启动。
 2. 健康检查接口可访问，例如 `GET /actuator/health` 或自定义 `GET /api/v1/health`。
 3. `mvn test` 通过。
+4. 基础分包已经落地，不存在明显的 Web 层、领域模型、基础设施实现混放。
+5. 核心公共类型和关键包具备最少必要注释，后续阶段不需要二次返工补文档化。
 
 ## 4. 阶段 1：数据库与领域模型
 
@@ -370,6 +407,8 @@ com.company.aiops
 3. 增加必要单元测试。
 4. 保持 JDK 21 兼容。
 5. 如果发现设计文档与实现冲突，先指出冲突并给出最小修改建议。
+6. 严格按职责拆分包结构；如果当前任务涉及的目录已经出现职责混放，必须在本次提交中一并整理。
+7. 为新增或修改的公共类型、复杂逻辑和关键流程补充必要注释，不接受“代码能跑但几乎无注释”的提交。
 ```
 
 ## 15. 开发完成定义
@@ -384,3 +423,5 @@ com.company.aiops
 6. 查询接口可以返回完整分析结果。
 7. 所有根因结论都有 evidenceId。
 8. 没有任何自动处置动作。
+9. 包结构与设计文档推荐目录基本一致，核心模块不存在长期平铺混放。
+10. 核心公共类型、复杂规则和关键流程具备可维护的注释说明。
