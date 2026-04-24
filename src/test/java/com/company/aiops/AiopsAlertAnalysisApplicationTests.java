@@ -291,7 +291,7 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
-    void webhookCreatesTaskAndWorkerEventuallyCompletesPlaceholderLifecycle() {
+    void webhookCreatesTaskAndWorkerEventuallyCompletesPlaceholderLifecycle() throws Exception {
         String alertId = nextNumericAlertId();
         ResponseEntity<JsonNode> response = postWebhook(withAlertId(RATE_ALERT, alertId));
 
@@ -317,6 +317,9 @@ class AiopsAlertAnalysisApplicationTests {
                 Integer.class,
                 taskId
         )).isEqualTo(6);
+        JsonNode result = loadResultJson(taskId);
+        assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("BUSINESS_ERROR_CODE_NOT_MASKED");
+        assertThat(result.path("evidenceRefs").toString()).contains("error.top.1", "uid.top.1");
     }
 
     @Test
@@ -372,6 +375,21 @@ class AiopsAlertAnalysisApplicationTests {
                 Integer.class,
                 taskId
         )).isEqualTo(1);
+    }
+
+    @Test
+    void webhookLatencyAlertPersistsTraceBasedRuleEvidenceInPlaceholderResult() throws Exception {
+        String alertId = nextNumericAlertId();
+        ResponseEntity<JsonNode> response = postWebhook(withAlertId(LATENCY_ALERT, alertId));
+
+        String taskId = response.getBody().path("data").path("taskId").asText();
+        AnalysisJob task = waitForTerminalTask(taskId);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
+
+        JsonNode result = loadResultJson(taskId);
+        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_ONLY");
+        assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("DOWNSTREAM_RPC_LATENCY");
+        assertThat(result.path("evidenceRefs").toString()).contains("trace.slow.1", "trace.slow.aggregation.1");
     }
 
     @Test

@@ -7,6 +7,9 @@ import com.company.aiops.analysis.evidence.ProviderCollectionResult;
 import com.company.aiops.analysis.job.AnalysisJob;
 import com.company.aiops.analysis.job.AnalysisJobStatus;
 import com.company.aiops.analysis.orchestrator.state.AnalysisJobStateMachine;
+import com.company.aiops.analysis.rule.RuleAnalysisService;
+import com.company.aiops.analysis.rule.model.CandidateRootCause;
+import com.company.aiops.analysis.rule.model.RuleAnalysisEvidence;
 import com.company.aiops.analysis.result.AnalysisMode;
 import com.company.aiops.analysis.result.AnalysisResult;
 import com.company.aiops.analysis.result.EvidenceReference;
@@ -28,9 +31,9 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Async entrypoint that drives one task through the explicit lifecycle graph.
  *
- * <p>The worker now performs real provider collection from phase 4. Rule analysis, evidence
- * compression, and LLM handling still use placeholder outputs so later phases can replace them
- * incrementally without rewriting lifecycle orchestration.</p>
+ * <p>The worker now performs real provider collection and deterministic rule analysis from phases 4
+ * and 5. Evidence compression and LLM handling still use placeholder outputs so later phases can
+ * replace them incrementally without rewriting lifecycle orchestration.</p>
  */
 @Service
 public class AnalysisJobWorker {
@@ -49,19 +52,22 @@ public class AnalysisJobWorker {
     private final AlertEventRepository alertEventRepository;
     private final AnalysisContextFactory analysisContextFactory;
     private final ProviderOrchestrator providerOrchestrator;
+    private final RuleAnalysisService ruleAnalysisService;
 
     public AnalysisJobWorker(
             AnalysisJobStateMachine analysisJobStateMachine,
             AnalysisJobCompletionService analysisJobCompletionService,
             AlertEventRepository alertEventRepository,
             AnalysisContextFactory analysisContextFactory,
-            ProviderOrchestrator providerOrchestrator
+            ProviderOrchestrator providerOrchestrator,
+            RuleAnalysisService ruleAnalysisService
     ) {
         this.analysisJobStateMachine = analysisJobStateMachine;
         this.analysisJobCompletionService = analysisJobCompletionService;
         this.alertEventRepository = alertEventRepository;
         this.analysisContextFactory = analysisContextFactory;
         this.providerOrchestrator = providerOrchestrator;
+        this.ruleAnalysisService = ruleAnalysisService;
     }
 
     /**
@@ -103,8 +109,9 @@ public class AnalysisJobWorker {
                     taskId,
                     AnalysisJobStatus.RULE_ANALYZING,
                     STEP_RULE,
-                    "provider collection completed; rule analysis remains a phase 5 placeholder"
+                    "provider collection completed; run deterministic phase-5 rule analysis"
             );
+            RuleAnalysisEvidence ruleAnalysis = ruleAnalysisService.analyze(collection);
             analysisJobStateMachine.transition(
                     taskId,
                     AnalysisJobStatus.COMPRESSING_EVIDENCE,
@@ -113,9 +120,9 @@ public class AnalysisJobWorker {
             );
 
             switch (scenario) {
-                case RULE_BASED_ONLY -> completeRuleOnly(taskId, collection);
-                case LLM_ASSISTED_SUCCESS -> completeLlmAssisted(taskId, collection);
-                case LLM_FALLBACK_TIMEOUT -> completeLlmFallback(taskId, collection);
+                case RULE_BASED_ONLY -> completeRuleOnly(taskId, collection, ruleAnalysis);
+                case LLM_ASSISTED_SUCCESS -> completeLlmAssisted(taskId, collection, ruleAnalysis);
+                case LLM_FALLBACK_TIMEOUT -> completeLlmFallback(taskId, collection, ruleAnalysis);
             }
         } catch (RuntimeException exception) {
             failIfPossible(taskId, exception);
@@ -123,7 +130,11 @@ public class AnalysisJobWorker {
         }
     }
 
-    private void completeRuleOnly(String taskId, ProviderCollectionResult collection) {
+    private void completeRuleOnly(
+            String taskId,
+            ProviderCollectionResult collection,
+            RuleAnalysisEvidence ruleAnalysis
+    ) {
         analysisJobStateMachine.transition(
                 taskId,
                 AnalysisJobStatus.GENERATING_RESULT,
@@ -137,11 +148,16 @@ public class AnalysisJobWorker {
                 false,
                 "NOT_REQUESTED",
                 collection.degradedByProviderFailure(),
-                null
+                null,
+                ruleAnalysis
         ));
     }
 
-    private void completeLlmAssisted(String taskId, ProviderCollectionResult collection) {
+    private void completeLlmAssisted(
+            String taskId,
+            ProviderCollectionResult collection,
+            RuleAnalysisEvidence ruleAnalysis
+    ) {
         analysisJobStateMachine.transition(
                 taskId,
                 AnalysisJobStatus.LLM_ANALYZING,
@@ -161,11 +177,16 @@ public class AnalysisJobWorker {
                 true,
                 "SUCCESS",
                 collection.degradedByProviderFailure(),
-                null
+                null,
+                ruleAnalysis
         ));
     }
 
-    private void completeLlmFallback(String taskId, ProviderCollectionResult collection) {
+    private void completeLlmFallback(
+            String taskId,
+            ProviderCollectionResult collection,
+            RuleAnalysisEvidence ruleAnalysis
+    ) {
         analysisJobStateMachine.transition(
                 taskId,
                 AnalysisJobStatus.LLM_ANALYZING,
@@ -191,7 +212,8 @@ public class AnalysisJobWorker {
                 false,
                 "TIMEOUT",
                 true,
-                "LLM integration is not implemented yet, so the worker validated the fallback branch with a provider-backed placeholder result."
+                "LLM integration is not implemented yet, so the worker validated the fallback branch with a provider- and rule-backed placeholder result.",
+                ruleAnalysis
         ));
     }
 
@@ -215,7 +237,8 @@ public class AnalysisJobWorker {
                 false,
                 "SKIPPED_BY_PROVIDER_FAILURE",
                 true,
-                collection.degradedReason()
+                collection.degradedReason(),
+                null
         ));
     }
 
@@ -250,23 +273,31 @@ public class AnalysisJobWorker {
             boolean llmUsed,
             String llmStatus,
             boolean degraded,
-            String degradedReason
+            String degradedReason,
+            RuleAnalysisEvidence ruleAnalysis
     ) {
         AlertEvent alert = collection.context().alert();
         boolean providerDegraded = collection.degradedByProviderFailure();
         boolean effectiveDegraded = degraded || providerDegraded;
         String effectiveDegradedReason = degradedReason != null ? degradedReason : collection.degradedReason();
-        List<EvidenceReference> evidenceRefs = buildEvidenceReferences(collection);
-        List<String> primaryEvidenceIds = collection.missingEvidence().isEmpty()
+        CandidateRootCause topCandidate = ruleAnalysis == null ? null : ruleAnalysis.topCandidateRootCause().orElse(null);
+        List<EvidenceReference> evidenceRefs = buildEvidenceReferences(collection, ruleAnalysis);
+        List<String> primaryEvidenceIds = topCandidate != null && !topCandidate.evidenceIds().isEmpty()
+                ? topCandidate.evidenceIds()
+                : collection.missingEvidence().isEmpty()
                 ? List.of("provider.collection.window")
                 : List.of("provider.collection.missing");
         String summary = switch (analysisMode) {
-            case RULE_BASED_ONLY -> providerDegraded
-                    ? "Provider collection completed with missing non-critical evidence. Rule, evidence-compression, and LLM phases still emit placeholder output."
-                    : "Provider collection completed successfully. Rule, evidence-compression, and LLM phases still emit placeholder output.";
-            case LLM_ASSISTED -> providerDegraded
-                    ? "Provider collection completed with missing evidence, and the worker simulated an LLM-assisted placeholder branch."
-                    : "Provider collection completed successfully, and the worker simulated an LLM-assisted placeholder branch.";
+            case RULE_BASED_ONLY -> summarizeRuleStage(
+                    providerDegraded,
+                    ruleAnalysis,
+                    "Evidence compression and LLM phases still emit placeholder output."
+            );
+            case LLM_ASSISTED -> summarizeRuleStage(
+                    providerDegraded,
+                    ruleAnalysis,
+                    "The worker simulated the later LLM-assisted branch with phase-5 rule evidence already prepared."
+            );
             case RULE_BASED_DEGRADED -> defaultIfBlank(
                     effectiveDegradedReason,
                     "Provider collection could not gather the minimum evidence required for normal analysis, so a degraded placeholder result was generated."
@@ -286,28 +317,35 @@ public class AnalysisJobWorker {
                                 effectiveDegradedReason,
                                 "Provider-backed placeholder result contains missing evidence and should be treated as degraded."
                         )
-                                : "Provider collection completed, but rule analysis and LLM reasoning are still placeholder-backed."
+                                : ruleAnalysis == null || ruleAnalysis.ruleFindings().isEmpty()
+                                ? "Provider collection completed, but later evidence-compression and LLM stages are still placeholder-backed."
+                                : "Rule analysis produced structured findings, but later evidence-compression and LLM stages are still placeholder-backed."
                 ),
                 List.of(new RootCauseHypothesis(
-                        "UNKNOWN",
+                        topCandidate == null ? "UNKNOWN" : topCandidate.causeType(),
                         analysisMode == AnalysisMode.RULE_BASED_DEGRADED
                                 ? defaultIfBlank(
                                 effectiveDegradedReason,
                                 "A degraded placeholder result was generated because key provider evidence was unavailable."
                         )
-                                : "Provider collection finished for %s/%s, but later analysis phases still use placeholder logic."
-                                .formatted(alert.serviceName(), alert.interfaceName()),
-                        effectiveDegraded ? 0.20 : 0.35,
+                                : topCandidate == null
+                                ? "Phase-5 rule analysis completed for %s/%s, but later phases still use placeholder logic."
+                                .formatted(alert.serviceName(), alert.interfaceName())
+                                : "Phase-5 rule analysis scored %s with %s confidence, but later phases still use placeholder logic."
+                                .formatted(topCandidate.causeType(), topCandidate.confidence()),
+                        effectiveDegraded ? 0.20 : topCandidate == null ? 0.35 : topCandidate.confidence(),
                         primaryEvidenceIds,
                         "RULE_ENGINE",
                         analysisMode == AnalysisMode.RULE_BASED_DEGRADED
                                 ? "Critical evidence is missing, so the worker can only emit a degraded placeholder conclusion."
-                                : "Provider evidence was collected, but later rule and LLM phases are not implemented yet."
+                                : topCandidate == null
+                                ? "Provider evidence was collected and phase-5 rule analysis ran, but later phases are not implemented yet."
+                                : defaultIfBlank(topCandidate.reasoning(), "Phase-5 rule scoring completed, but later phases are not implemented yet.")
                 )),
-                buildRecommendations(collection, analysisMode, alert),
+                buildRecommendations(collection, analysisMode, alert, topCandidate),
                 evidenceRefs,
                 collection.missingEvidence(),
-                buildInsufficientEvidence(collection),
+                buildInsufficientEvidence(collection, ruleAnalysis),
                 null,
                 llmUsed,
                 llmStatus,
@@ -322,7 +360,8 @@ public class AnalysisJobWorker {
     private List<Recommendation> buildRecommendations(
             ProviderCollectionResult collection,
             AnalysisMode analysisMode,
-            AlertEvent alert
+            AlertEvent alert,
+            CandidateRootCause topCandidate
     ) {
         List<Recommendation> recommendations = new ArrayList<>();
         if (!collection.missingEvidence().isEmpty()) {
@@ -336,13 +375,20 @@ public class AnalysisJobWorker {
         recommendations.add(new Recommendation(
                 analysisMode == AnalysisMode.RULE_BASED_DEGRADED ? "P1" : "P2",
                 "FOLLOW_UP",
-                "Continue with rule analysis, evidence compression, and LLM integration to replace the placeholder conclusion.",
-                alert.serviceName()
+                topCandidate == null
+                        ? "Continue with evidence compression and LLM integration to replace the placeholder conclusion."
+                        : "Continue with evidence compression and LLM integration after reviewing the highest-scored phase-5 rule evidence.",
+                topCandidate == null || topCandidate.evidenceIds().isEmpty()
+                        ? alert.serviceName()
+                        : topCandidate.evidenceIds().get(0)
         ));
         return recommendations;
     }
 
-    private List<EvidenceReference> buildEvidenceReferences(ProviderCollectionResult collection) {
+    private List<EvidenceReference> buildEvidenceReferences(
+            ProviderCollectionResult collection,
+            RuleAnalysisEvidence ruleAnalysis
+    ) {
         List<EvidenceReference> references = new ArrayList<>();
         references.add(new EvidenceReference(
                 "provider.collection.window",
@@ -391,16 +437,43 @@ public class AnalysisJobWorker {
                     "One or more provider calls failed, timed out, or returned partial evidence."
             ));
         }
+        if (ruleAnalysis != null) {
+            references.addAll(ruleAnalysis.evidenceRefs());
+        }
         return references;
     }
 
-    private List<String> buildInsufficientEvidence(ProviderCollectionResult collection) {
+    private List<String> buildInsufficientEvidence(
+            ProviderCollectionResult collection,
+            RuleAnalysisEvidence ruleAnalysis
+    ) {
         List<String> insufficientEvidence = new ArrayList<>();
         if (collection.degradedReason() != null && !collection.degradedReason().isBlank()) {
             insufficientEvidence.add(collection.degradedReason());
         }
-        insufficientEvidence.add("Rule analysis, evidence compression, and LLM integration remain placeholder-backed in the current implementation.");
+        if (ruleAnalysis != null) {
+            insufficientEvidence.addAll(ruleAnalysis.insufficientEvidence());
+        }
+        insufficientEvidence.add("Evidence compression and LLM integration remain placeholder-backed in the current implementation.");
         return insufficientEvidence;
+    }
+
+    private String summarizeRuleStage(
+            boolean providerDegraded,
+            RuleAnalysisEvidence ruleAnalysis,
+            String suffix
+    ) {
+        String prefix = providerDegraded
+                ? "Provider collection completed with missing non-critical evidence."
+                : "Provider collection completed successfully.";
+        if (ruleAnalysis == null || ruleAnalysis.ruleFindings().isEmpty()) {
+            return prefix + " " + suffix;
+        }
+        return prefix
+                + " Phase-5 rule analysis generated findings: "
+                + String.join(", ", ruleAnalysis.topFindingTypes(3))
+                + ". "
+                + suffix;
     }
 
     private String defaultIfBlank(String value, String defaultValue) {

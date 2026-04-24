@@ -267,3 +267,155 @@ mvn test
 3. `MetricAnomalyDetector`
 4. `TraceTopologyAnalyzer`
 5. 基于本次 `ProviderCollectionResult` 的规则证据生成
+
+---
+
+## 补充记录：阶段 5 规则预分析
+
+本次补充完成 `aiops-alert-analysis-development-plan.md` 中阶段 5 的主要内容，并将规则预分析相关代码按职责落入新的 `analysis.rule` 分层包。
+
+### 范围说明
+
+1. 严格按阶段 5 边界实现规则预分析，不提前实现阶段 6 的 `EvidenceCompressor` 和阶段 7 的完整规则降级结果生成。
+2. 不实现真实内网 Provider，继续复用阶段 4 的 Provider 接口与 Mock。
+3. 只在阶段 5 涉及的目录内新增或调整代码，未改动与本阶段无关的模块。
+
+### 设计文档冲突说明
+
+本次实现前再次确认到三个与阶段 5 直接相关的冲突或落差：
+
+1. `aiops-alert-analysis-design.md` 第 18.5 节将“第五阶段”写成了“内网适配和调优”；但开发计划第 8 节和本目录最新开发日志都将阶段 5 定义为“规则预分析”。本次按开发计划与最新日志执行。
+2. 设计文档将 `InterfaceLogEvidence`、`TraceEvidence`、`MetricEvidence` 描述为聚合摘要；而现有阶段 4 实现中它们是 Provider 收集后的原始交接 DTO。本次保持阶段 4 实现不回退，在阶段 5 新增 `RuleAnalysisEvidence` 作为聚合规则证据层。
+3. 设计文档中的 `MetricAnomalyDetector` 示例更偏向时间序列检测接口；但当前 Provider 契约只返回聚合快照。本次先按当前契约实现阈值、单实例偏斜和高信号计数检测。
+
+最小修改建议：
+
+1. 将设计文档第 18 章的阶段编号与开发计划统一，避免“阶段 5”语义继续分叉。
+2. 在设计文档中将证据模型拆成两层：
+   - 阶段 4：Provider 原始采集 DTO
+   - 阶段 5：`RuleAnalysisEvidence` 聚合规则证据
+3. 在 `MetricAnomalyDetector` 章节补充说明：当前版本基于快照检测，后续真实 Provider 接入时间序列后再升级算法。
+
+### 阶段 5 已完成内容
+
+1. 新增 `analysis.rule` 模块分层：
+   - `analysis.rule.error`
+   - `analysis.rule.latency`
+   - `analysis.rule.metric`
+   - `analysis.rule.trace`
+   - `analysis.rule.model`
+2. 定义阶段 5 统一入口 `RuleAnalysisService`，默认实现为 `DefaultRuleAnalysisService`，按告警类别路由到不同规则分析器。
+3. 实现 `TraceTopologyAnalyzer`，当前默认实现为 `DefaultTraceTopologyAnalyzer`：
+   - 基于 `spanId` / `parentSpanId` 重建调用关系
+   - 支持查找根 span、首个失败 span、最慢 span 和未解析父节点
+4. 实现 `MetricAnomalyDetector`，当前默认实现为 `DefaultMetricAnomalyDetector`：
+   - 容器 CPU / 内存 / GC / 实例状态
+   - CSE 使用率
+   - DB CPU / 连接 / 锁等待 / 写时延 / 慢 SQL
+   - DCS P99 / 平均时延 / 慢查询比例 / 客户端失败
+   - MQ 堆积 / 发布消费时延 / 失败次数
+5. 实现 `ErrorRateRuleAnalyzer`，当前默认实现为 `DefaultErrorRateRuleAnalyzer`：
+   - 请求量影响范围判断
+   - `errorCode` TopN 聚合
+   - 基于 `errorMsg` 的业务语义判断
+   - `uid` 集中度统计
+   - 基于 trace 的下游失败识别
+   - 资源异常关联打分
+6. 实现 `LatencyRuleAnalyzer`，当前默认实现为 `DefaultLatencyRuleAnalyzer`：
+   - 平均时延 / P99 区分
+   - 慢 trace 聚合
+   - 最慢 span 识别
+   - 下游慢点判断
+   - DB / DCS / 容器 / GC / 实例状态 / 流量突增关联打分
+7. 新增阶段 5 结构化输出模型：
+   - `RuleAnalysisEvidence`
+   - `RuleFinding`
+   - `CandidateRootCause`
+   - `ErrorCodeAggregate`
+   - `UidAggregate`
+   - `TraceObservation`
+   - `DownstreamObservation`
+   - `MetricAnomaly`
+8. 将 `RULE_ANALYZING` 真正接入 `AnalysisJobWorker`：
+   - Provider 收集完成后真实执行阶段 5 规则分析
+   - 当前占位结果会携带阶段 5 产出的 evidenceId 和最高分候选根因
+   - 不提前落地阶段 6 / 7 的结果生成职责
+9. 更新 `AnalysisJobCompletionService` 和 `analysis/package-info.java`，使说明与当前职责边界一致。
+
+### 当前阶段 5 执行口径
+
+1. 阶段 5 已经真实执行规则预分析，但最终结果仍是“阶段 5 规则证据 + 阶段 6/7 占位输出”的组合，不应冒充完整最终分析报告。
+2. 错误率规则中“业务 errorCode 未屏蔽”判断严格基于 `errorMsg` 语义，不根据 `errorCode` 字面值直接下结论。
+3. 时延规则中调用关系仍通过 `spanId` / `parentSpanId` 推断，因此会在 `insufficientEvidence` 中明确记录该限制。
+4. 当前 `MetricAnomalyDetector` 仅基于 Provider 快照做确定性检测，不依赖真实时序指标接口。
+
+### 本次包结构整理
+
+根据“涉及目录若存在职责混放必须在本次提交中一并整理”的约束，本次新增并固定了如下规则分析包边界：
+
+```text
+com.company.aiops.analysis.rule
+  error
+    ErrorRateRuleAnalyzer
+    DefaultErrorRateRuleAnalyzer
+  latency
+    LatencyRuleAnalyzer
+    DefaultLatencyRuleAnalyzer
+  metric
+    MetricAnomalyDetector
+    DefaultMetricAnomalyDetector
+  trace
+    TraceTopologyAnalyzer
+    DefaultTraceTopologyAnalyzer
+    TraceTree
+    TraceSpan
+  model
+    RuleAnalysisEvidence
+    RuleFinding
+    CandidateRootCause
+    ErrorCodeAggregate
+    UidAggregate
+    TraceObservation
+    DownstreamObservation
+    MetricAnomaly
+```
+
+这次没有把规则模型继续混放回 `analysis.evidence` 或 `analysis.result`，也没有把规则执行逻辑塞进 `analysis.orchestrator`。
+
+### 验证情况
+
+已运行：
+
+```powershell
+mvn test
+```
+
+结果：通过。  
+当前测试数：28 个。
+
+本次新增/调整测试覆盖：
+
+1. `DefaultTraceTopologyAnalyzer` 的调用树构建、根节点识别、未解析父节点识别、首个失败 span / 最慢 span 识别。
+2. `DefaultMetricAnomalyDetector` 的容器 / CSE / DB / DCS 快照异常检测。
+3. `DefaultErrorRateRuleAnalyzer` 的 `errorCode` 聚合、`errorMsg` 业务语义判断、`uid` 聚合和下游失败识别。
+4. `DefaultLatencyRuleAnalyzer` 的慢 trace 聚合、最慢 span 聚合和下游慢点识别。
+5. Webhook 端到端场景下，错误率占位结果已带上真实阶段 5 规则 evidenceId。
+6. Webhook 端到端场景下，时延占位结果已带上真实阶段 5 trace 规则 evidenceId。
+
+### 当前注意事项
+
+1. 阶段 5 已具备真实规则预分析能力，但 `EvidenceCompressor`、`aiops_evidence_bundle` 落库和完整规则降级结果仍未实现。
+2. 当前持久化的 `AnalysisResult` 仍是占位结果结构，只是已经带有真实的阶段 5 规则证据索引和最高分候选根因。
+3. 本次没有修改任何真实内网 Provider 适配逻辑；后续“内网适配和调优”仍应放到后续阶段单独实现。
+
+### 下一步建议
+
+下一阶段应进入阶段 6：`EvidenceCompressor`。
+
+建议优先做：
+
+1. 设计并实现压缩后的结构化 evidence bundle。
+2. 复用本次 `RuleAnalysisEvidence` 生成稳定 evidenceId 索引。
+3. 按配置裁剪 `errorCode`、`uid`、慢 trace 和运行日志样本。
+4. 落库 `aiops_evidence_bundle`。
+5. 为阶段 7 的规则降级分析和阶段 8 的 LLM 输入准备统一证据格式。
