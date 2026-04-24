@@ -13,4 +13,12 @@ public record AnalysisContext(
         ResourceMapping resourceMapping,
         AnalysisOptions options
 ) {
+
+    /**
+     * Replaces the resolved resource mapping after the provider step without rebuilding the rest of
+     * the execution context.
+     */
+    public AnalysisContext withResourceMapping(ResourceMapping nextResourceMapping) {
+        return new AnalysisContext(alert, alarmWindow, baselineWindow, nextResourceMapping, options);
+    }
 }

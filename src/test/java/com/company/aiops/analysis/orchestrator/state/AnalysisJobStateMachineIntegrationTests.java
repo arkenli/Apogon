@@ -47,6 +47,7 @@ class AnalysisJobStateMachineIntegrationTests {
     @BeforeEach
     void cleanDatabase() {
         jdbcTemplate.update("DELETE FROM aiops_analysis_job_state_log");
+        jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
         jdbcTemplate.update("DELETE FROM aiops_analysis_task");

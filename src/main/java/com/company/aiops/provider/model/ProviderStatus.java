@@ -7,6 +7,6 @@ public enum ProviderStatus {
     SUCCESS,
     TIMEOUT,
     FAILED,
-    PARTIAL,
+    PARTIAL_SUCCESS,
     SKIPPED
 }

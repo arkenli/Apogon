@@ -40,15 +40,17 @@ public class AnalysisJobCompletionService {
                 taskId,
                 terminalStatus,
                 STEP_COMPLETE,
-                completionReason(analysisResult.analysisMode())
+                completionReason(analysisResult)
         );
     }
 
-    private String completionReason(AnalysisMode analysisMode) {
-        return switch (analysisMode) {
-            case LLM_ASSISTED -> "placeholder LLM-assisted result persisted";
-            case RULE_BASED_DEGRADED -> "placeholder degraded result persisted";
-            case RULE_BASED_ONLY -> "placeholder rule-only result persisted";
+    private String completionReason(AnalysisResult analysisResult) {
+        return switch (analysisResult.analysisMode()) {
+            case LLM_ASSISTED -> "provider-backed placeholder LLM-assisted result persisted";
+            case RULE_BASED_DEGRADED -> "provider-triggered degraded placeholder result persisted";
+            case RULE_BASED_ONLY -> analysisResult.degraded()
+                    ? "provider-backed placeholder result persisted with non-critical missing evidence"
+                    : "provider-backed placeholder rule-only result persisted";
         };
     }
 }

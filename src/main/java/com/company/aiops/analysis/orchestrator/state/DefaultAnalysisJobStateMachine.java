@@ -142,6 +142,7 @@ public class DefaultAnalysisJobStateMachine implements AnalysisJobStateMachine {
         ));
         transitions.put(AnalysisJobStatus.COLLECTING_EVIDENCE, EnumSet.of(
                 AnalysisJobStatus.RULE_ANALYZING,
+                AnalysisJobStatus.RULE_FALLBACK_ANALYZING,
                 AnalysisJobStatus.FAILED
         ));
         transitions.put(AnalysisJobStatus.RULE_ANALYZING, EnumSet.of(

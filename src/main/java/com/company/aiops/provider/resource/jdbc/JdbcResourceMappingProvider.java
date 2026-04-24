@@ -1,7 +1,8 @@
-package com.company.aiops.provider.resource;
+package com.company.aiops.provider.resource.jdbc;
 
 import com.company.aiops.persistence.repository.ResourceMappingRepository;
 import com.company.aiops.provider.model.ResourceMapping;
+import com.company.aiops.provider.resource.ResourceMappingProvider;
 import org.springframework.stereotype.Component;
 
 /**

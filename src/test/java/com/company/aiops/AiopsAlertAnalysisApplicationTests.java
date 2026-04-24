@@ -127,6 +127,7 @@ class AiopsAlertAnalysisApplicationTests {
     @BeforeEach
     void cleanDatabase() {
         jdbcTemplate.update("DELETE FROM aiops_analysis_job_state_log");
+        jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
         jdbcTemplate.update("DELETE FROM aiops_analysis_task");
@@ -319,6 +320,61 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
+    void webhookMarksTaskDegradedWhenNonCriticalRuntimeLogProviderFails() throws Exception {
+        String alertId = nextNumericAlertId();
+        String serviceName = "ams_front_" + System.nanoTime() + "_mock-fail-runtime-log";
+        ResponseEntity<JsonNode> response = postWebhook(withServiceName(withAlertId(RATE_ALERT, alertId), serviceName));
+
+        String taskId = response.getBody().path("data").path("taskId").asText();
+        AnalysisJob task = waitForTerminalTask(taskId);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
+
+        JsonNode result = loadResultJson(taskId);
+        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_ONLY");
+        assertThat(result.path("degraded").asBoolean()).isTrue();
+        assertThat(result.path("degradedByProviderFailure").asBoolean()).isTrue();
+        assertThat(result.path("missingEvidence").toString()).contains("runtimeLog");
+        assertThat(jdbcTemplate.queryForObject(
+                """
+                        SELECT COUNT(*)
+                        FROM aiops_provider_call_log
+                        WHERE task_id = ?
+                          AND provider_name = 'runtimeLog'
+                          AND provider_status = 'FAILED'
+                        """,
+                Integer.class,
+                taskId
+        )).isGreaterThan(0);
+    }
+
+    @Test
+    void webhookFallsBackWhenCriticalInterfaceLogProviderFails() throws Exception {
+        String alertId = nextNumericAlertId();
+        String serviceName = "ams_front_" + System.nanoTime() + "_mock-fail-interface-log";
+        ResponseEntity<JsonNode> response = postWebhook(withServiceName(withAlertId(RATE_ALERT, alertId), serviceName));
+
+        String taskId = response.getBody().path("data").path("taskId").asText();
+        AnalysisJob task = waitForTerminalTask(taskId);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
+
+        JsonNode result = loadResultJson(taskId);
+        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_DEGRADED");
+        assertThat(result.path("degraded").asBoolean()).isTrue();
+        assertThat(result.path("degradedByProviderFailure").asBoolean()).isTrue();
+        assertThat(result.path("missingEvidence").toString()).contains("interfaceLog");
+        assertThat(jdbcTemplate.queryForObject(
+                """
+                        SELECT COUNT(*)
+                        FROM aiops_analysis_job_state_log
+                        WHERE task_id = ?
+                          AND to_status = 'RULE_FALLBACK_ANALYZING'
+                        """,
+                Integer.class,
+                taskId
+        )).isEqualTo(1);
+    }
+
+    @Test
     void duplicateWebhookWithinFiveMinutesReturnsExistingTask() {
         String firstAlertId = nextNumericAlertId();
         String secondAlertId = String.valueOf(Long.parseLong(firstAlertId) + 1);
@@ -406,8 +462,23 @@ class AiopsAlertAnalysisApplicationTests {
         return rawAlert.replaceAll("(?m)^Alert ID: .+$", "Alert ID: " + alertId);
     }
 
+    private String withServiceName(String rawAlert, String serviceName) {
+        return rawAlert
+                .replace("\"servicename\":\"ams_front\"", "\"servicename\":\"" + serviceName + "\"")
+                .replace("serviceName='ams_front'", "serviceName='" + serviceName + "'");
+    }
+
     private String nextNumericAlertId() {
         return String.valueOf(System.currentTimeMillis());
+    }
+
+    private JsonNode loadResultJson(String taskId) throws Exception {
+        String json = jdbcTemplate.queryForObject(
+                "SELECT result_json FROM aiops_analysis_result WHERE task_id = ?",
+                String.class,
+                taskId
+        );
+        return objectMapper.readTree(json);
     }
 
     private AnalysisJob waitForTerminalTask(String taskId) {

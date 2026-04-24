@@ -1,4 +1,4 @@
 /**
- * Resource-mapping provider contracts and implementations.
+ * Resource-mapping provider contracts.
  */
 package com.company.aiops.provider.resource;

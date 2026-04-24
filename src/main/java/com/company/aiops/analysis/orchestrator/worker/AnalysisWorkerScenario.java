@@ -1,8 +1,8 @@
 package com.company.aiops.analysis.orchestrator.worker;
 
 /**
- * Worker scenarios used to validate lifecycle branches before provider, rule, and LLM integrations
- * land in later phases.
+ * Worker scenarios used by tests to simulate downstream rule/LLM branches after provider
+ * collection has finished.
  */
 public enum AnalysisWorkerScenario {
     RULE_BASED_ONLY,

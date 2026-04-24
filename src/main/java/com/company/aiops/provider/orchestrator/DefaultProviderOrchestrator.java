@@ -1,0 +1,586 @@
+package com.company.aiops.provider.orchestrator;
+
+import com.company.aiops.alert.model.AlertCategory;
+import com.company.aiops.analysis.context.AnalysisContext;
+import com.company.aiops.analysis.evidence.BaselineEvidence;
+import com.company.aiops.analysis.evidence.InterfaceLogEvidence;
+import com.company.aiops.analysis.evidence.MetricEvidence;
+import com.company.aiops.analysis.evidence.ProviderCollectionResult;
+import com.company.aiops.analysis.evidence.RuntimeLogEvidence;
+import com.company.aiops.analysis.evidence.TraceEvidence;
+import com.company.aiops.analysis.evidence.TraceRecord;
+import com.company.aiops.analysis.result.MissingEvidence;
+import com.company.aiops.common.config.AiopsProperties;
+import com.company.aiops.provider.baseline.BaselineProvider;
+import com.company.aiops.provider.log.InterfaceLogProvider;
+import com.company.aiops.provider.log.RuntimeLogProvider;
+import com.company.aiops.provider.metric.MetricProvider;
+import com.company.aiops.provider.model.ContainerMetrics;
+import com.company.aiops.provider.model.CseMetrics;
+import com.company.aiops.provider.model.DatabaseMetrics;
+import com.company.aiops.provider.model.DcsMetrics;
+import com.company.aiops.provider.model.InterfaceBaseline;
+import com.company.aiops.provider.model.InterfaceLogEntry;
+import com.company.aiops.provider.model.MqMetrics;
+import com.company.aiops.provider.model.ProviderResult;
+import com.company.aiops.provider.model.ProviderStatus;
+import com.company.aiops.provider.model.ResourceMapping;
+import com.company.aiops.provider.model.RuntimeLogEntry;
+import com.company.aiops.provider.resource.ResourceMappingProvider;
+import com.company.aiops.provider.trace.TraceProvider;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Callable;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+/**
+ * Default provider collection flow from the design document. Independent providers are scheduled in
+ * parallel, while trace/runtime-log calls wait for sampled trace ids from interface logs.
+ */
+@Service
+public class DefaultProviderOrchestrator implements ProviderOrchestrator {
+
+    private static final String PROVIDER_RESOURCE_MAPPING = "resourceMapping";
+    private static final String PROVIDER_BASELINE = "baseline";
+    private static final String PROVIDER_INTERFACE_LOG = "interfaceLog";
+    private static final String PROVIDER_TRACE = "trace";
+    private static final String PROVIDER_RUNTIME_LOG = "runtimeLog";
+    private static final String PROVIDER_METRIC_CONTAINER = "metric.container";
+    private static final String PROVIDER_METRIC_CSE = "metric.cse";
+    private static final String PROVIDER_METRIC_DATABASE = "metric.database";
+    private static final String PROVIDER_METRIC_DCS = "metric.dcs";
+    private static final String PROVIDER_METRIC_MQ = "metric.mq";
+
+    private final AiopsProperties aiopsProperties;
+    private final ProviderCallExecutor providerCallExecutor;
+    private final ResourceMappingProvider resourceMappingProvider;
+    private final BaselineProvider baselineProvider;
+    private final InterfaceLogProvider interfaceLogProvider;
+    private final TraceProvider traceProvider;
+    private final RuntimeLogProvider runtimeLogProvider;
+    private final MetricProvider metricProvider;
+
+    public DefaultProviderOrchestrator(
+            AiopsProperties aiopsProperties,
+            ProviderCallExecutor providerCallExecutor,
+            ResourceMappingProvider resourceMappingProvider,
+            BaselineProvider baselineProvider,
+            InterfaceLogProvider interfaceLogProvider,
+            TraceProvider traceProvider,
+            RuntimeLogProvider runtimeLogProvider,
+            MetricProvider metricProvider
+    ) {
+        this.aiopsProperties = aiopsProperties;
+        this.providerCallExecutor = providerCallExecutor;
+        this.resourceMappingProvider = resourceMappingProvider;
+        this.baselineProvider = baselineProvider;
+        this.interfaceLogProvider = interfaceLogProvider;
+        this.traceProvider = traceProvider;
+        this.runtimeLogProvider = runtimeLogProvider;
+        this.metricProvider = metricProvider;
+    }
+
+    @Override
+    public ProviderCollectionResult collect(String taskId, AnalysisContext initialContext) {
+        CompletableFuture<ProviderResult<ResourceMapping>> resourceMappingFuture = schedule(() ->
+                execute(taskId, initialContext, PROVIDER_RESOURCE_MAPPING, false, () ->
+                        resourceMappingProvider.queryResourceMapping(
+                                initialContext.alert().serviceName(),
+                                initialContext.alert().cluster()
+                        )));
+        CompletableFuture<ProviderResult<InterfaceBaseline>> baselineFuture = schedule(() ->
+                execute(taskId, initialContext, PROVIDER_BASELINE, false, () ->
+                        baselineProvider.getInterfaceBaseline(
+                                initialContext.alert().serviceName(),
+                                initialContext.alert().interfaceName(),
+                                initialContext.alert().cluster(),
+                                initialContext.alert().metricOccurTime(),
+                                aiopsProperties.analysis().baselineCompareDuration(),
+                                aiopsProperties.analysis().baselineOffsetDays()
+                        )));
+        CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() ->
+                execute(taskId, initialContext, PROVIDER_INTERFACE_LOG, true, () ->
+                        interfaceLogProvider.queryByInterface(
+                                initialContext.alert().serviceName(),
+                                initialContext.alert().interfaceName(),
+                                initialContext.alarmWindow(),
+                                initialContext.options().maxInterfaceLogLimit()
+                        )));
+        CompletableFuture<ProviderResult<ContainerMetrics>> containerMetricFuture = schedule(() ->
+                execute(taskId, initialContext, PROVIDER_METRIC_CONTAINER, false, () ->
+                        metricProvider.getContainerMetrics(
+                                initialContext.alert().serviceName(),
+                                initialContext.alert().cluster(),
+                                initialContext.alarmWindow()
+                        )));
+        CompletableFuture<ProviderResult<CseMetrics>> cseMetricFuture = schedule(() ->
+                execute(taskId, initialContext, PROVIDER_METRIC_CSE, false, () ->
+                        metricProvider.getCseMetrics(
+                                initialContext.alert().serviceName(),
+                                initialContext.alert().cluster(),
+                                initialContext.alarmWindow()
+                        )));
+
+        ProviderResult<ResourceMapping> resourceMappingResult = join(resourceMappingFuture);
+        ResourceMapping resourceMapping = resourceMappingResult.isUsable() && resourceMappingResult.data() != null
+                ? resourceMappingResult.data()
+                : ResourceMapping.empty(initialContext.alert().serviceName(), initialContext.alert().cluster());
+        AnalysisContext context = initialContext.withResourceMapping(resourceMapping);
+
+        CompletableFuture<ProviderResult<DatabaseMetrics>> databaseMetricFuture = schedule(() ->
+                resourceMapping.resourceIds("DATABASE").isEmpty()
+                        ? providerCallExecutor.skipped(
+                        taskId,
+                        context.alert().alertId(),
+                        PROVIDER_METRIC_DATABASE,
+                        false,
+                        "no DATABASE resource mapping resolved"
+                )
+                        : execute(taskId, context, PROVIDER_METRIC_DATABASE, false, () ->
+                        metricProvider.getDatabaseMetrics(resourceMapping.resourceIds("DATABASE"), context.alarmWindow())));
+        CompletableFuture<ProviderResult<DcsMetrics>> dcsMetricFuture = schedule(() ->
+                resourceMapping.resourceIds("DCS").isEmpty()
+                        ? providerCallExecutor.skipped(
+                        taskId,
+                        context.alert().alertId(),
+                        PROVIDER_METRIC_DCS,
+                        false,
+                        "no DCS resource mapping resolved"
+                )
+                        : execute(taskId, context, PROVIDER_METRIC_DCS, false, () ->
+                        metricProvider.getDcsMetrics(resourceMapping.resourceIds("DCS"), context.alarmWindow())));
+        CompletableFuture<ProviderResult<MqMetrics>> mqMetricFuture = schedule(() ->
+                resourceMapping.resourceIds("MQ").isEmpty()
+                        ? providerCallExecutor.skipped(
+                        taskId,
+                        context.alert().alertId(),
+                        PROVIDER_METRIC_MQ,
+                        false,
+                        "no MQ resource mapping resolved"
+                )
+                        : execute(taskId, context, PROVIDER_METRIC_MQ, false, () ->
+                        metricProvider.getMqMetrics(resourceMapping.resourceIds("MQ"), context.alarmWindow())));
+
+        ProviderResult<InterfaceBaseline> baselineResult = join(baselineFuture);
+        ProviderResult<List<InterfaceLogEntry>> interfaceLogResult = join(interfaceLogFuture);
+        ProviderResult<ContainerMetrics> containerMetricResult = join(containerMetricFuture);
+        ProviderResult<CseMetrics> cseMetricResult = join(cseMetricFuture);
+        ProviderResult<DatabaseMetrics> databaseMetricResult = join(databaseMetricFuture);
+        ProviderResult<DcsMetrics> dcsMetricResult = join(dcsMetricFuture);
+        ProviderResult<MqMetrics> mqMetricResult = join(mqMetricFuture);
+
+        List<String> sampledTraceIds = sampleTraceIds(context.alert().category(), interfaceLogResult, context);
+
+        ProviderResult<List<TraceRecord>> traceResult = collectTraces(taskId, context, sampledTraceIds);
+        ProviderResult<List<RuntimeLogEntry>> runtimeLogResult = collectRuntimeLogs(taskId, context, sampledTraceIds);
+        ProviderResult<MetricEvidence> metricAggregateResult = aggregateMetricResults(
+                containerMetricResult,
+                cseMetricResult,
+                databaseMetricResult,
+                dcsMetricResult,
+                mqMetricResult
+        );
+
+        BaselineEvidence baselineEvidence = toBaselineEvidence(baselineResult);
+        InterfaceLogEvidence interfaceLogEvidence = toInterfaceLogEvidence(interfaceLogResult, sampledTraceIds);
+        TraceEvidence traceEvidence = toTraceEvidence(traceResult, sampledTraceIds);
+        RuntimeLogEvidence runtimeLogEvidence = toRuntimeLogEvidence(runtimeLogResult, sampledTraceIds);
+        MetricEvidence metricEvidence = metricAggregateResult.data() == null
+                ? MetricEvidence.missing(metricAggregateResult.errorMessage())
+                : metricAggregateResult.data();
+
+        List<ProviderResult<?>> providerResults = List.of(
+                resourceMappingResult,
+                baselineResult,
+                interfaceLogResult,
+                containerMetricResult,
+                cseMetricResult,
+                databaseMetricResult,
+                dcsMetricResult,
+                mqMetricResult,
+                traceResult,
+                runtimeLogResult
+        );
+        List<MissingEvidence> missingEvidence = buildMissingEvidence(context.alert().category(), providerResults);
+
+        boolean interfaceLogUnavailable = interfaceLogResult.isFailure();
+        boolean latencyTraceUnavailable = context.alert().category() == AlertCategory.RPC_LATENCY
+                && !sampledTraceIds.isEmpty()
+                && traceResult.isFailure();
+        boolean nonCriticalFailure = providerResults.stream()
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_INTERFACE_LOG))
+                .anyMatch(this::hasMissingEvidence);
+        boolean fallbackRequired = interfaceLogUnavailable
+                || latencyTraceUnavailable
+                || (!aiopsProperties.provider().continueOnNonCriticalFailure() && nonCriticalFailure);
+        boolean degradedByProviderFailure = !missingEvidence.isEmpty();
+        String degradedReason = buildDegradedReason(
+                interfaceLogUnavailable,
+                latencyTraceUnavailable,
+                nonCriticalFailure,
+                missingEvidence
+        );
+
+        return new ProviderCollectionResult(
+                context,
+                baselineEvidence,
+                interfaceLogEvidence,
+                traceEvidence,
+                runtimeLogEvidence,
+                metricEvidence,
+                missingEvidence,
+                degradedByProviderFailure,
+                fallbackRequired,
+                degradedReason,
+                providerResults
+        );
+    }
+
+    private <T> CompletableFuture<ProviderResult<T>> schedule(Supplier<ProviderResult<T>> supplier) {
+        if (!aiopsProperties.provider().parallelEnabled()) {
+            return CompletableFuture.completedFuture(supplier.get());
+        }
+        return CompletableFuture.supplyAsync(supplier);
+    }
+
+    private <T> ProviderResult<T> execute(
+            String taskId,
+            AnalysisContext context,
+            String providerName,
+            boolean critical,
+            Callable<T> operation
+    ) {
+        return providerCallExecutor.execute(
+                taskId,
+                context.alert().alertId(),
+                providerName,
+                critical,
+                operation
+        );
+    }
+
+    private <T> ProviderResult<T> join(CompletableFuture<ProviderResult<T>> future) {
+        return future.join();
+    }
+
+    private List<String> sampleTraceIds(
+            AlertCategory category,
+            ProviderResult<List<InterfaceLogEntry>> interfaceLogResult,
+            AnalysisContext context
+    ) {
+        if (!interfaceLogResult.isUsable() || interfaceLogResult.data() == null || interfaceLogResult.data().isEmpty()) {
+            return List.of();
+        }
+
+        return switch (category) {
+            case RPC_ERROR_RATE -> interfaceLogResult.data().stream()
+                    .filter(entry -> !entry.success())
+                    .map(InterfaceLogEntry::traceId)
+                    .filter(this::hasText)
+                    .collect(Collectors.collectingAndThen(
+                            Collectors.toCollection(LinkedHashSet::new),
+                            traceIds -> traceIds.stream()
+                                    .limit(context.options().maxTraceSampleSize())
+                                    .toList()
+                    ));
+            case RPC_LATENCY -> interfaceLogResult.data().stream()
+                    .filter(entry -> hasText(entry.traceId()))
+                    .sorted(Comparator.comparingLong(InterfaceLogEntry::latencyMs).reversed())
+                    .map(InterfaceLogEntry::traceId)
+                    .collect(Collectors.collectingAndThen(
+                            Collectors.toCollection(LinkedHashSet::new),
+                            traceIds -> traceIds.stream()
+                                    .limit(context.options().maxSlowTraceSampleSize())
+                                    .toList()
+                    ));
+            case UNKNOWN -> List.of();
+        };
+    }
+
+    private ProviderResult<List<TraceRecord>> collectTraces(
+            String taskId,
+            AnalysisContext context,
+            List<String> sampledTraceIds
+    ) {
+        if (sampledTraceIds.isEmpty()) {
+            return providerCallExecutor.skipped(
+                    taskId,
+                    context.alert().alertId(),
+                    PROVIDER_TRACE,
+                    context.alert().category() == AlertCategory.RPC_LATENCY,
+                    "no sampled trace ids available from interface logs"
+                );
+        }
+
+        List<CompletableFuture<ProviderResult<TraceRecord>>> futures = sampledTraceIds.stream()
+                .map(traceId -> schedule(() -> providerCallExecutor.execute(
+                        taskId,
+                        context.alert().alertId(),
+                        PROVIDER_TRACE,
+                        context.alert().category() == AlertCategory.RPC_LATENCY,
+                        () -> new TraceRecord(traceId, traceProvider.queryTraceInterfaces(traceId))
+                )))
+                .toList();
+
+        List<ProviderResult<TraceRecord>> results = futures.stream().map(this::join).toList();
+        List<TraceRecord> traces = results.stream()
+                .filter(ProviderResult::isUsable)
+                .map(ProviderResult::data)
+                .filter(Objects::nonNull)
+                .toList();
+        return aggregateResults(PROVIDER_TRACE, traces, results, "trace queries skipped");
+    }
+
+    private ProviderResult<List<RuntimeLogEntry>> collectRuntimeLogs(
+            String taskId,
+            AnalysisContext context,
+            List<String> sampledTraceIds
+    ) {
+        if (sampledTraceIds.isEmpty()) {
+            return providerCallExecutor.skipped(
+                    taskId,
+                    context.alert().alertId(),
+                    PROVIDER_RUNTIME_LOG,
+                    false,
+                    "no sampled trace ids available for runtime-log lookup"
+            );
+        }
+
+        List<CompletableFuture<ProviderResult<List<RuntimeLogEntry>>>> futures = sampledTraceIds.stream()
+                .map(traceId -> schedule(() -> providerCallExecutor.execute(
+                        taskId,
+                        context.alert().alertId(),
+                        PROVIDER_RUNTIME_LOG,
+                        false,
+                        () -> runtimeLogProvider.queryWarnAndErrorLogs(
+                                traceId,
+                                context.alert().serviceName(),
+                                context.alarmWindow(),
+                                context.options().maxRuntimeLogSize()
+                        )
+                )))
+                .toList();
+
+        List<ProviderResult<List<RuntimeLogEntry>>> results = futures.stream().map(this::join).toList();
+        List<RuntimeLogEntry> mergedEntries = results.stream()
+                .filter(ProviderResult::isUsable)
+                .map(ProviderResult::data)
+                .filter(Objects::nonNull)
+                .flatMap(List::stream)
+                .limit(context.options().maxRuntimeLogSize())
+                .toList();
+        return aggregateResults(PROVIDER_RUNTIME_LOG, mergedEntries, results, "runtime-log queries skipped");
+    }
+
+    private ProviderResult<MetricEvidence> aggregateMetricResults(
+            ProviderResult<ContainerMetrics> containerMetricResult,
+            ProviderResult<CseMetrics> cseMetricResult,
+            ProviderResult<DatabaseMetrics> databaseMetricResult,
+            ProviderResult<DcsMetrics> dcsMetricResult,
+            ProviderResult<MqMetrics> mqMetricResult
+    ) {
+        List<ProviderResult<?>> results = List.of(
+                containerMetricResult,
+                cseMetricResult,
+                databaseMetricResult,
+                dcsMetricResult,
+                mqMetricResult
+        );
+        MetricEvidence evidence = MetricEvidence.available(
+                containerMetricResult.isUsable() ? containerMetricResult.data() : ContainerMetrics.empty(),
+                cseMetricResult.isUsable() ? cseMetricResult.data() : CseMetrics.empty(),
+                databaseMetricResult.isUsable() ? databaseMetricResult.data() : DatabaseMetrics.empty(),
+                dcsMetricResult.isUsable() ? dcsMetricResult.data() : DcsMetrics.empty(),
+                mqMetricResult.isUsable() ? mqMetricResult.data() : MqMetrics.empty(),
+                summarizeFailures(results)
+        );
+        return aggregateResults("metric", evidence, results, "metric queries skipped");
+    }
+
+    private <T> ProviderResult<T> aggregateResults(
+            String providerName,
+            T data,
+            List<? extends ProviderResult<?>> results,
+            String skippedReason
+    ) {
+        boolean anyUsable = results.stream().anyMatch(ProviderResult::isUsable);
+        boolean anyFailure = results.stream().anyMatch(ProviderResult::isFailure);
+        boolean anyPartial = results.stream().anyMatch(result -> result.status() == ProviderStatus.PARTIAL_SUCCESS);
+        Duration latency = results.stream()
+                .map(ProviderResult::latency)
+                .filter(Objects::nonNull)
+                .reduce(Duration.ZERO, Duration::plus);
+
+        if (anyUsable && (anyFailure || anyPartial)) {
+            return ProviderResult.partialSuccess(
+                    providerName,
+                    data,
+                    "PARTIAL_PROVIDER_FAILURE",
+                    summarizeFailures(results),
+                    latency
+            );
+        }
+        if (anyUsable) {
+            return ProviderResult.success(providerName, data, latency);
+        }
+        if (anyFailure) {
+            boolean allTimeout = results.stream()
+                    .filter(result -> result.status() != ProviderStatus.SKIPPED)
+                    .allMatch(result -> result.status() == ProviderStatus.TIMEOUT);
+            if (allTimeout) {
+                return ProviderResult.timeout(providerName, summarizeFailures(results), latency);
+            }
+            return ProviderResult.failure(
+                    providerName,
+                    "PROVIDER_EXECUTION_ERROR",
+                    summarizeFailures(results),
+                    latency
+            );
+        }
+        return ProviderResult.skipped(providerName, skippedReason);
+    }
+
+    private BaselineEvidence toBaselineEvidence(ProviderResult<InterfaceBaseline> baselineResult) {
+        if (baselineResult.isUsable() && baselineResult.data() != null) {
+            return BaselineEvidence.available(baselineResult.data());
+        }
+        return BaselineEvidence.missing(baselineResult.errorMessage());
+    }
+
+    private InterfaceLogEvidence toInterfaceLogEvidence(
+            ProviderResult<List<InterfaceLogEntry>> interfaceLogResult,
+            List<String> sampledTraceIds
+    ) {
+        if (interfaceLogResult.isUsable() && interfaceLogResult.data() != null) {
+            return InterfaceLogEvidence.available(interfaceLogResult.data(), sampledTraceIds);
+        }
+        return InterfaceLogEvidence.missing(interfaceLogResult.errorMessage());
+    }
+
+    private TraceEvidence toTraceEvidence(ProviderResult<List<TraceRecord>> traceResult, List<String> sampledTraceIds) {
+        if (traceResult.isUsable() && traceResult.data() != null) {
+            return TraceEvidence.available(traceResult.data());
+        }
+        if (sampledTraceIds.isEmpty()) {
+            return TraceEvidence.missing("no sampled trace ids available from interface logs");
+        }
+        return TraceEvidence.missing(traceResult.errorMessage());
+    }
+
+    private RuntimeLogEvidence toRuntimeLogEvidence(
+            ProviderResult<List<RuntimeLogEntry>> runtimeLogResult,
+            List<String> sampledTraceIds
+    ) {
+        if (runtimeLogResult.isUsable() && runtimeLogResult.data() != null) {
+            return RuntimeLogEvidence.available(runtimeLogResult.data());
+        }
+        if (sampledTraceIds.isEmpty()) {
+            return RuntimeLogEvidence.missing("no sampled trace ids available for runtime-log lookup");
+        }
+        return RuntimeLogEvidence.missing(runtimeLogResult.errorMessage());
+    }
+
+    private List<MissingEvidence> buildMissingEvidence(
+            AlertCategory category,
+            List<ProviderResult<?>> providerResults
+    ) {
+        List<MissingEvidence> missingEvidence = new ArrayList<>();
+        for (ProviderResult<?> result : providerResults) {
+            if (!hasMissingEvidence(result)) {
+                continue;
+            }
+            missingEvidence.add(new MissingEvidence(
+                    result.providerName(),
+                    defaultIfBlank(result.errorMessage(), "provider evidence unavailable"),
+                    isCriticalProvider(result.providerName(), category),
+                    impactFor(result.providerName(), category)
+            ));
+        }
+        return missingEvidence;
+    }
+
+    private boolean hasMissingEvidence(ProviderResult<?> result) {
+        return result.status() == ProviderStatus.FAILED
+                || result.status() == ProviderStatus.TIMEOUT
+                || result.status() == ProviderStatus.PARTIAL_SUCCESS;
+    }
+
+    private boolean isCriticalProvider(String providerName, AlertCategory category) {
+        if (PROVIDER_INTERFACE_LOG.equals(providerName)) {
+            return true;
+        }
+        return category == AlertCategory.RPC_LATENCY && PROVIDER_TRACE.equals(providerName);
+    }
+
+    private String impactFor(String providerName, AlertCategory category) {
+        return switch (providerName) {
+            case PROVIDER_INTERFACE_LOG ->
+                    "Cannot locate errorCode, uid, trace topology, or interface latency distribution.";
+            case PROVIDER_TRACE ->
+                    category == AlertCategory.RPC_LATENCY
+                            ? "Cannot verify downstream slow spans for the latency alert."
+                            : "Downstream trace topology is incomplete.";
+            case PROVIDER_RUNTIME_LOG ->
+                    "WARN/ERROR runtime log samples are unavailable for this alert window.";
+            case PROVIDER_BASELINE ->
+                    "Historical comparison for the same time window is unavailable.";
+            case PROVIDER_RESOURCE_MAPPING ->
+                    "DB/DCS/MQ metric lookups may be incomplete because resource mapping is unavailable.";
+            case PROVIDER_METRIC_CONTAINER ->
+                    "Service-side container pressure cannot be verified.";
+            case PROVIDER_METRIC_CSE ->
+                    "RPC framework pressure cannot be verified.";
+            case PROVIDER_METRIC_DATABASE ->
+                    "Database pressure cannot be verified.";
+            case PROVIDER_METRIC_DCS ->
+                    "DCS/cache pressure cannot be verified.";
+            case PROVIDER_METRIC_MQ ->
+                    "MQ pressure cannot be verified.";
+            default -> "Provider evidence is incomplete.";
+        };
+    }
+
+    private String buildDegradedReason(
+            boolean interfaceLogUnavailable,
+            boolean latencyTraceUnavailable,
+            boolean nonCriticalFailure,
+            List<MissingEvidence> missingEvidence
+    ) {
+        if (interfaceLogUnavailable) {
+            return "Interface logs are unavailable, so the task cannot locate errorCode, uid, trace, or latency distribution.";
+        }
+        if (latencyTraceUnavailable) {
+            return "Trace evidence is unavailable for a latency alert, so downstream slow-point confirmation is not possible.";
+        }
+        if (nonCriticalFailure && !missingEvidence.isEmpty()) {
+            return "Provider collection finished with missing evidence from: "
+                    + missingEvidence.stream().map(MissingEvidence::providerName).distinct().collect(Collectors.joining(", "));
+        }
+        return null;
+    }
+
+    private String summarizeFailures(List<? extends ProviderResult<?>> results) {
+        String summary = results.stream()
+                .filter(this::hasMissingEvidence)
+                .map(result -> result.providerName() + "=" + defaultIfBlank(result.errorMessage(), result.status().name()))
+                .distinct()
+                .collect(Collectors.joining("; "));
+        return summary.isBlank() ? null : summary;
+    }
+
+    private String defaultIfBlank(String value, String defaultValue) {
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+}

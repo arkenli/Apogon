@@ -1,7 +1,7 @@
 /**
  * Provider abstractions grouped by external data source type.
  *
- * <p>The current implementation only includes resource mapping support, while other provider
- * categories from the design document remain available for later extension.</p>
+ * <p>Contracts, DTOs, orchestration, and concrete adapters are split into dedicated subpackages so
+ * the provider layer does not mix interfaces with JDBC or mock implementations.</p>
  */
 package com.company.aiops.provider;

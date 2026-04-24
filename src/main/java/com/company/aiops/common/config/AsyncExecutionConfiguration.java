@@ -26,4 +26,21 @@ public class AsyncExecutionConfiguration {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * Provider invocations need their own pool because the orchestrator may wait on several
+     * providers in parallel while the analysis worker thread keeps ownership of the task lifecycle.
+     */
+    @Bean(name = "providerExecutor")
+    public ThreadPoolTaskExecutor providerExecutor(AiopsProperties aiopsProperties) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("provider-call-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds((int) aiopsProperties.analysis().asyncTimeout().toSeconds());
+        executor.initialize();
+        return executor;
+    }
 }
