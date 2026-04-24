@@ -398,7 +398,7 @@ com.company.aiops
 推荐提示词格式：
 
 ```text
-请基于 docs/aiops-alert-analysis-design.md 和 docs/aiops-alert-analysis-development-plan.md，
+请基于 docs/aiops-alert-analysis-design.md 和 docs/aiops-alert-analysis-development-plan.md，以及docs目录下的开发日志文件
 只实现阶段 X 的内容。
 
 约束：
