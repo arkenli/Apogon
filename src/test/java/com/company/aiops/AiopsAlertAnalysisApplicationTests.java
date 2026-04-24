@@ -35,6 +35,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -125,6 +126,7 @@ class AiopsAlertAnalysisApplicationTests {
 
     @BeforeEach
     void cleanDatabase() {
+        jdbcTemplate.update("DELETE FROM aiops_analysis_job_state_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
         jdbcTemplate.update("DELETE FROM aiops_analysis_task");
@@ -288,7 +290,7 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
-    void webhookCreatesPendingTaskForNewAlert() {
+    void webhookCreatesTaskAndWorkerEventuallyCompletesPlaceholderLifecycle() {
         String alertId = nextNumericAlertId();
         ResponseEntity<JsonNode> response = postWebhook(withAlertId(RATE_ALERT, alertId));
 
@@ -299,12 +301,21 @@ class AiopsAlertAnalysisApplicationTests {
         assertThat(data.path("duplicate").asBoolean()).isFalse();
         assertThat(data.path("taskId").asText()).startsWith("task_");
 
-        assertThat(analysisTaskRepository.findByTaskId(data.path("taskId").asText()))
-                .hasValueSatisfying(task -> {
-                    assertThat(task.alertId()).isEqualTo(alertId);
-                    assertThat(task.status()).isEqualTo(AnalysisJobStatus.PENDING);
-                    assertThat(task.category()).isEqualTo(AlertCategory.RPC_ERROR_RATE);
-                });
+        String taskId = data.path("taskId").asText();
+        AnalysisJob task = waitForTerminalTask(taskId);
+        assertThat(task.alertId()).isEqualTo(alertId);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
+        assertThat(task.category()).isEqualTo(AlertCategory.RPC_ERROR_RATE);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT analysis_mode FROM aiops_analysis_result WHERE task_id = ?",
+                String.class,
+                taskId
+        )).isEqualTo("RULE_BASED_ONLY");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_analysis_job_state_log WHERE task_id = ?",
+                Integer.class,
+                taskId
+        )).isEqualTo(6);
     }
 
     @Test
@@ -397,5 +408,18 @@ class AiopsAlertAnalysisApplicationTests {
 
     private String nextNumericAlertId() {
         return String.valueOf(System.currentTimeMillis());
+    }
+
+    private AnalysisJob waitForTerminalTask(String taskId) {
+        Instant deadline = Instant.now().plusSeconds(5);
+        while (Instant.now().isBefore(deadline)) {
+            AnalysisJob task = analysisTaskRepository.findByTaskId(taskId).orElse(null);
+            if (task != null && task.status().isTerminal()) {
+                return task;
+            }
+            LockSupport.parkNanos(Duration.ofMillis(50).toNanos());
+        }
+        return analysisTaskRepository.findByTaskId(taskId)
+                .orElseThrow(() -> new AssertionError("Task not found: " + taskId));
     }
 }

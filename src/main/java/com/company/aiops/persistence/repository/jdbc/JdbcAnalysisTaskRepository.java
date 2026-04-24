@@ -67,6 +67,38 @@ public class JdbcAnalysisTaskRepository implements AnalysisTaskRepository {
     }
 
     @Override
+    public boolean updateState(AnalysisJob analysisJob, long expectedStateVersion) {
+        Instant now = Instant.now();
+        return jdbcTemplate.update(
+                """
+                        UPDATE aiops_analysis_task
+                        SET task_status = ?,
+                            current_step = ?,
+                            status_reason = ?,
+                            retry_count = ?,
+                            state_version = ?,
+                            failure_reason = ?,
+                            started_at = ?,
+                            finished_at = ?,
+                            updated_at = ?
+                        WHERE task_id = ?
+                          AND state_version = ?
+                        """,
+                analysisJob.status().name(),
+                analysisJob.currentStep(),
+                analysisJob.statusReason(),
+                analysisJob.retryCount(),
+                analysisJob.stateVersion(),
+                analysisJob.failureReason(),
+                timestamp(analysisJob.startedAt()),
+                timestamp(analysisJob.finishedAt()),
+                timestamp(now),
+                analysisJob.taskId(),
+                expectedStateVersion
+        ) == 1;
+    }
+
+    @Override
     public Optional<AnalysisJob> findByTaskId(String taskId) {
         try {
             return Optional.ofNullable(jdbcTemplate.queryForObject(

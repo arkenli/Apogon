@@ -15,5 +15,16 @@ public enum AnalysisJobStatus {
     SUCCESS,
     FAILED,
     DEGRADED_SUCCESS,
-    SKIPPED_DUPLICATE
+    SKIPPED_DUPLICATE;
+
+    /**
+     * Terminal states must reject any further transitions so duplicate workers cannot roll a task
+     * back into an earlier lifecycle step.
+     */
+    public boolean isTerminal() {
+        return switch (this) {
+            case SUCCESS, FAILED, DEGRADED_SUCCESS, SKIPPED_DUPLICATE -> true;
+            default -> false;
+        };
+    }
 }

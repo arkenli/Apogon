@@ -11,18 +11,20 @@ import com.company.aiops.alert.parser.AlertParser;
 import com.company.aiops.alert.support.TaskIdGenerator;
 import com.company.aiops.analysis.model.AnalysisJob;
 import com.company.aiops.analysis.model.AnalysisJobStatus;
+import com.company.aiops.analysis.orchestrator.AnalysisJobExecutionRequestedEvent;
 import com.company.aiops.common.exception.AiopsException;
 import com.company.aiops.common.exception.ErrorCode;
 import com.company.aiops.persistence.repository.AlertEventRepository;
 import com.company.aiops.persistence.repository.AnalysisTaskRepository;
 import com.company.aiops.persistence.repository.DuplicateAlertLinkRepository;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 
 /**
- * 串联告警接入流程，负责解析、分类、去重和任务创建。
+ * Coordinates alert ingestion, parsing, dedupe handling, and initial task creation.
  */
 @Service
 public class AlertIngestionService {
@@ -35,6 +37,7 @@ public class AlertIngestionService {
     private final AlertDeduplicationService alertDeduplicationService;
     private final DedupeKeyGenerator dedupeKeyGenerator;
     private final TaskIdGenerator taskIdGenerator;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     public AlertIngestionService(
             AlertParser alertParser,
@@ -44,7 +47,8 @@ public class AlertIngestionService {
             DuplicateAlertLinkRepository duplicateAlertLinkRepository,
             AlertDeduplicationService alertDeduplicationService,
             DedupeKeyGenerator dedupeKeyGenerator,
-            TaskIdGenerator taskIdGenerator
+            TaskIdGenerator taskIdGenerator,
+            ApplicationEventPublisher applicationEventPublisher
     ) {
         this.alertParser = alertParser;
         this.alertClassifier = alertClassifier;
@@ -54,10 +58,11 @@ public class AlertIngestionService {
         this.alertDeduplicationService = alertDeduplicationService;
         this.dedupeKeyGenerator = dedupeKeyGenerator;
         this.taskIdGenerator = taskIdGenerator;
+        this.applicationEventPublisher = applicationEventPublisher;
     }
 
     /**
-     * 将原始告警接入系统，并根据去重结果返回已有任务或新建任务。
+     * Stores the alert and either reuses an existing task or creates a new pending task.
      */
     @Transactional
     public AlertWebhookResponse ingest(String rawText) {
@@ -100,6 +105,7 @@ public class AlertIngestionService {
                 null
         );
         analysisTaskRepository.save(analysisJob);
+        applicationEventPublisher.publishEvent(new AnalysisJobExecutionRequestedEvent(analysisJob.taskId()));
 
         return new AlertWebhookResponse(
                 alert.alertId(),
@@ -113,16 +119,19 @@ public class AlertIngestionService {
 
     private void validateAlert(AlertEvent alert) {
         if (alert.alertId() == null) {
-            throw new AiopsException(ErrorCode.BAD_REQUEST, "告警缺少 Alert ID");
+            throw new AiopsException(ErrorCode.BAD_REQUEST, "Missing Alert ID");
         }
         if (alert.category() == AlertCategory.UNKNOWN) {
-            throw new AiopsException(ErrorCode.BAD_REQUEST, "不支持的告警类型");
+            throw new AiopsException(ErrorCode.BAD_REQUEST, "Unsupported alert category");
         }
         if (alert.serviceName() == null || alert.interfaceName() == null || alert.cluster() == null) {
-            throw new AiopsException(ErrorCode.BAD_REQUEST, "告警缺少 serviceName、interfaceName 或 cluster");
+            throw new AiopsException(
+                    ErrorCode.BAD_REQUEST,
+                    "Alert must contain serviceName, interfaceName, and cluster"
+            );
         }
         if (alert.metricOccurTime() == null) {
-            throw new AiopsException(ErrorCode.BAD_REQUEST, "告警缺少指标发生时间");
+            throw new AiopsException(ErrorCode.BAD_REQUEST, "Missing metric occurrence time");
         }
     }
 }

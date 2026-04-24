@@ -13,9 +13,19 @@ import java.util.Optional;
 public interface AnalysisTaskRepository {
 
     /**
-     * Inserts or updates one analysis task snapshot.
+     * Inserts or updates one analysis task snapshot. This is used for initial task creation and
+     * test data setup.
      */
     void save(AnalysisJob analysisJob);
+
+    /**
+     * Updates lifecycle fields guarded by {@code task_id + state_version}. This is the only write
+     * path that the explicit state machine should use after task creation.
+     *
+     * @return {@code true} when exactly one row was updated; {@code false} when the optimistic-lock
+     * check failed and the caller must reload the task state.
+     */
+    boolean updateState(AnalysisJob analysisJob, long expectedStateVersion);
 
     /**
      * Loads a task by its generated task id.
