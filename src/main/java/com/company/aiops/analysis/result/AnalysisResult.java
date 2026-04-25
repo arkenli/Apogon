@@ -26,6 +26,7 @@ public record AnalysisResult(
         boolean degraded,
         boolean degradedByProviderFailure,
         String degradedReason,
+        String ruleEngineVersion,
         double overallConfidence,
         Instant generatedAt
 ) {

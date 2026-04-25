@@ -49,6 +49,7 @@ public class JdbcAnalysisResultRepository implements AnalysisResultRepository {
                             degraded = VALUES(degraded),
                             degraded_by_provider_failure = VALUES(degraded_by_provider_failure),
                             degraded_reason = VALUES(degraded_reason),
+                            rule_engine_version = VALUES(rule_engine_version),
                             result_json = VALUES(result_json),
                             generated_at = VALUES(generated_at)
                         """,
@@ -65,7 +66,7 @@ public class JdbcAnalysisResultRepository implements AnalysisResultRepository {
                 analysisResult.degraded(),
                 analysisResult.degradedByProviderFailure(),
                 analysisResult.degradedReason(),
-                null,
+                analysisResult.ruleEngineVersion(),
                 jsonMapper.toJson(analysisResult),
                 timestamp(analysisResult.generatedAt()),
                 timestamp(now)

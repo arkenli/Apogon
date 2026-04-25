@@ -7,6 +7,8 @@ import com.company.aiops.analysis.bundle.StoredEvidenceBundle;
 import com.company.aiops.analysis.context.AnalysisContext;
 import com.company.aiops.analysis.context.AnalysisContextFactory;
 import com.company.aiops.analysis.evidence.ProviderCollectionResult;
+import com.company.aiops.analysis.fallback.RuleBasedAnalysisRequest;
+import com.company.aiops.analysis.fallback.RuleBasedFallbackAnalyzer;
 import com.company.aiops.analysis.job.AnalysisJob;
 import com.company.aiops.analysis.job.AnalysisJobStatus;
 import com.company.aiops.analysis.orchestrator.state.AnalysisJobStateMachine;
@@ -30,16 +32,15 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
  * Async entrypoint that drives one task through the explicit lifecycle graph.
  *
- * <p>The worker now performs real provider collection, deterministic rule analysis, and phase-6
- * evidence compression. Only the later LLM and rule-fallback result-generation branches still use
- * placeholder outputs.</p>
+ * <p>The worker performs real provider collection, deterministic rule analysis, phase-6 evidence
+ * compression, and stage-7 rule-based result generation. Only the simulated
+ * {@code LLM_ASSISTED_SUCCESS} branch remains a test-only placeholder until stage 8 lands.</p>
  */
 @Service
 public class AnalysisJobWorker {
@@ -62,6 +63,7 @@ public class AnalysisJobWorker {
     private final RuleAnalysisService ruleAnalysisService;
     private final EvidenceCompressor evidenceCompressor;
     private final EvidenceBundleRepository evidenceBundleRepository;
+    private final RuleBasedFallbackAnalyzer ruleBasedFallbackAnalyzer;
 
     public AnalysisJobWorker(
             AiopsProperties aiopsProperties,
@@ -72,7 +74,8 @@ public class AnalysisJobWorker {
             ProviderOrchestrator providerOrchestrator,
             RuleAnalysisService ruleAnalysisService,
             EvidenceCompressor evidenceCompressor,
-            EvidenceBundleRepository evidenceBundleRepository
+            EvidenceBundleRepository evidenceBundleRepository,
+            RuleBasedFallbackAnalyzer ruleBasedFallbackAnalyzer
     ) {
         this.aiopsProperties = aiopsProperties;
         this.analysisJobStateMachine = analysisJobStateMachine;
@@ -83,6 +86,7 @@ public class AnalysisJobWorker {
         this.ruleAnalysisService = ruleAnalysisService;
         this.evidenceCompressor = evidenceCompressor;
         this.evidenceBundleRepository = evidenceBundleRepository;
+        this.ruleBasedFallbackAnalyzer = ruleBasedFallbackAnalyzer;
     }
 
     /**
@@ -90,7 +94,10 @@ public class AnalysisJobWorker {
      */
     @Async("analysisJobExecutor")
     public CompletableFuture<Void> submit(String taskId) {
-        processTask(taskId, AnalysisWorkerScenario.RULE_BASED_ONLY);
+        AnalysisWorkerScenario scenario = aiopsProperties.llm().enabled()
+                ? AnalysisWorkerScenario.LLM_FALLBACK_TIMEOUT
+                : AnalysisWorkerScenario.RULE_BASED_ONLY;
+        processTask(taskId, scenario);
         return CompletableFuture.completedFuture(null);
     }
 
@@ -157,19 +164,17 @@ public class AnalysisJobWorker {
                 taskId,
                 AnalysisJobStatus.GENERATING_RESULT,
                 STEP_GENERATE,
-                "generate a provider-backed placeholder result"
+                "generate a rule-only result because LLM is disabled"
         );
-        analysisJobCompletionService.complete(taskId, buildPlaceholderResult(
+        analysisJobCompletionService.complete(taskId, ruleBasedFallbackAnalyzer.analyze(new RuleBasedAnalysisRequest(
                 taskId,
                 collection,
-                AnalysisMode.RULE_BASED_ONLY,
-                false,
-                "NOT_REQUESTED",
-                collection.degradedByProviderFailure(),
-                null,
                 ruleAnalysis,
-                compressedEvidence
-        ));
+                compressedEvidence,
+                AnalysisMode.RULE_BASED_ONLY,
+                "DISABLED",
+                collection.degradedReason()
+        )));
     }
 
     private void completeLlmAssisted(
@@ -188,16 +193,11 @@ public class AnalysisJobWorker {
                 taskId,
                 AnalysisJobStatus.GENERATING_RESULT,
                 STEP_GENERATE,
-                "generate a simulated LLM-assisted placeholder result"
+                "generate a simulated LLM-assisted result for lifecycle tests"
         );
-        analysisJobCompletionService.complete(taskId, buildPlaceholderResult(
+        analysisJobCompletionService.complete(taskId, buildSimulatedLlmAssistedResult(
                 taskId,
                 collection,
-                AnalysisMode.LLM_ASSISTED,
-                true,
-                "SUCCESS",
-                collection.degradedByProviderFailure(),
-                null,
                 ruleAnalysis,
                 compressedEvidence
         ));
@@ -225,19 +225,17 @@ public class AnalysisJobWorker {
                 taskId,
                 AnalysisJobStatus.GENERATING_RESULT,
                 STEP_GENERATE,
-                "generate degraded placeholder result after LLM timeout"
+                "generate degraded rule-based result after LLM timeout"
         );
-        analysisJobCompletionService.complete(taskId, buildPlaceholderResult(
+        analysisJobCompletionService.complete(taskId, ruleBasedFallbackAnalyzer.analyze(new RuleBasedAnalysisRequest(
                 taskId,
                 collection,
-                AnalysisMode.RULE_BASED_DEGRADED,
-                false,
-                "TIMEOUT",
-                true,
-                "LLM integration is not implemented yet, so the worker validated the fallback branch with persisted compressed evidence and a placeholder degraded result.",
                 ruleAnalysis,
-                compressedEvidence
-        ));
+                compressedEvidence,
+                AnalysisMode.RULE_BASED_DEGRADED,
+                "TIMEOUT",
+                "LLM timed out, so the final result was generated by the stage-7 deterministic fallback rules."
+        )));
     }
 
     private void completeProviderFallback(String taskId, ProviderCollectionResult collection) {
@@ -251,19 +249,17 @@ public class AnalysisJobWorker {
                 taskId,
                 AnalysisJobStatus.GENERATING_RESULT,
                 STEP_GENERATE,
-                "generate a provider-fallback placeholder result"
+                "generate a degraded rule-based result because critical provider evidence is missing"
         );
-        analysisJobCompletionService.complete(taskId, buildPlaceholderResult(
+        analysisJobCompletionService.complete(taskId, ruleBasedFallbackAnalyzer.analyze(new RuleBasedAnalysisRequest(
                 taskId,
                 collection,
-                AnalysisMode.RULE_BASED_DEGRADED,
-                false,
-                "SKIPPED_BY_PROVIDER_FAILURE",
-                true,
-                collection.degradedReason(),
                 null,
-                null
-        ));
+                null,
+                AnalysisMode.RULE_BASED_DEGRADED,
+                "SKIPPED_BY_PROVIDER_FAILURE",
+                collection.degradedReason()
+        )));
     }
 
     private AlertEvent loadAlert(String alertId) {
@@ -302,222 +298,79 @@ public class AnalysisJobWorker {
         evidenceBundleRepository.save(StoredEvidenceBundle.compressed(taskId, alertId, compressedEvidence, createdAt, expireAt));
     }
 
-    private AnalysisResult buildPlaceholderResult(
+    /**
+     * Stage-8 LLM integration is not implemented yet, but lifecycle tests still need a successful
+     * {@code LLM_ASSISTED} branch. The branch stays explicitly marked as simulated so it cannot be
+     * mistaken for a real model-backed conclusion.
+     */
+    private AnalysisResult buildSimulatedLlmAssistedResult(
             String taskId,
             ProviderCollectionResult collection,
-            AnalysisMode analysisMode,
-            boolean llmUsed,
-            String llmStatus,
-            boolean degraded,
-            String degradedReason,
             RuleAnalysisEvidence ruleAnalysis,
             CompressedEvidenceBundle compressedEvidence
     ) {
         AlertEvent alert = collection.context().alert();
-        boolean providerDegraded = collection.degradedByProviderFailure();
-        boolean effectiveDegraded = degraded || providerDegraded;
-        String effectiveDegradedReason = degradedReason != null ? degradedReason : collection.degradedReason();
-        CandidateRootCause topCandidate = ruleAnalysis == null ? null : ruleAnalysis.topCandidateRootCause().orElse(null);
-        List<EvidenceReference> evidenceRefs = compressedEvidence != null
-                ? compressedEvidence.evidenceRefs()
-                : buildEvidenceReferences(collection, ruleAnalysis);
-        List<String> primaryEvidenceIds = topCandidate != null && !topCandidate.evidenceIds().isEmpty()
+        CandidateRootCause topCandidate = ruleAnalysis.topCandidateRootCause().orElse(null);
+        List<String> evidenceIds = topCandidate != null && !topCandidate.evidenceIds().isEmpty()
                 ? topCandidate.evidenceIds()
-                : compressedEvidence != null && !compressedEvidence.evidenceRefs().isEmpty()
-                ? List.of(compressedEvidence.evidenceRefs().get(0).evidenceId())
-                : collection.missingEvidence().isEmpty()
-                ? List.of("provider.collection.window")
-                : List.of("provider.collection.missing");
-        String summary = switch (analysisMode) {
-            case RULE_BASED_ONLY -> summarizeRuleStage(
-                    providerDegraded,
-                    ruleAnalysis,
-                    "Phase-6 evidence compression completed, but LLM and rule-fallback result generation still emit placeholder output."
-            );
-            case LLM_ASSISTED -> summarizeRuleStage(
-                    providerDegraded,
-                    ruleAnalysis,
-                    "The worker simulated the later LLM-assisted branch after persisting the phase-6 compressed evidence bundle."
-            );
-            case RULE_BASED_DEGRADED -> defaultIfBlank(
-                    effectiveDegradedReason,
-                    "Provider collection could not gather the minimum evidence required for normal analysis, so a degraded placeholder result was generated."
-            );
-        };
+                : compressedEvidence.evidenceRefs().stream()
+                .map(EvidenceReference::evidenceId)
+                .limit(2)
+                .toList();
+        if (evidenceIds.isEmpty()) {
+            evidenceIds = List.of("alert.context.1");
+        }
+        boolean degraded = collection.degradedByProviderFailure();
+        String degradedReason = collection.degradedReason();
 
         return new AnalysisResult(
                 taskId,
                 alert.alertId(),
                 alert.category(),
-                analysisMode,
-                summary,
+                AnalysisMode.LLM_ASSISTED,
+                topCandidate == null
+                        ? "Simulated LLM-assisted branch completed for lifecycle tests, but no dominant deterministic cause was scored."
+                        : "Simulated LLM-assisted branch merged deterministic evidence around %s for lifecycle tests."
+                        .formatted(topCandidate.causeType()),
                 new ImpactAssessment(
                         "UNKNOWN",
-                        providerDegraded
-                                ? defaultIfBlank(
-                                effectiveDegradedReason,
-                                "Provider-backed placeholder result contains missing evidence and should be treated as degraded."
-                        )
-                                : ruleAnalysis == null || ruleAnalysis.ruleFindings().isEmpty()
-                                ? "Provider collection and phase-6 compression completed, but later LLM/fallback result generation is still placeholder-backed."
-                                : "Rule analysis and phase-6 compression completed, but later LLM/fallback result generation is still placeholder-backed."
+                        "This branch remains a stage-8 simulation and is only used to validate the success lifecycle."
                 ),
                 List.of(new RootCauseHypothesis(
-                        topCandidate == null ? "UNKNOWN" : topCandidate.causeType(),
-                        analysisMode == AnalysisMode.RULE_BASED_DEGRADED
-                                ? defaultIfBlank(
-                                effectiveDegradedReason,
-                                "A degraded placeholder result was generated because key provider evidence was unavailable."
+                        topCandidate == null ? "SIMULATED_LLM_RESULT" : topCandidate.causeType(),
+                        topCandidate == null
+                                ? "No dominant deterministic cause was available, so the simulated branch keeps the result generic."
+                                : "Simulated LLM-assisted branch reused deterministic evidence around %s."
+                                .formatted(topCandidate.causeType()),
+                        topCandidate == null ? 0.40 : topCandidate.confidence(),
+                        evidenceIds,
+                        "MERGED",
+                        topCandidate == null
+                                ? "Stage-8 LLM integration is not implemented yet; this lifecycle branch only proves the happy-path state transition."
+                                : defaultIfBlank(
+                                topCandidate.reasoning(),
+                                "Stage-8 LLM integration is not implemented yet; this lifecycle branch only proves the happy-path state transition."
                         )
-                                : topCandidate == null
-                                ? "Phase-6 compressed evidence was produced for %s/%s, but later phases still use placeholder logic."
-                                .formatted(alert.serviceName(), alert.interfaceName())
-                                : "Phase-5 rule analysis scored %s with %s confidence, and phase-6 compressed evidence is ready for later phases."
-                                .formatted(topCandidate.causeType(), topCandidate.confidence()),
-                        effectiveDegraded ? 0.20 : topCandidate == null ? 0.35 : topCandidate.confidence(),
-                        primaryEvidenceIds,
-                        "RULE_ENGINE",
-                        analysisMode == AnalysisMode.RULE_BASED_DEGRADED
-                                ? "Critical evidence is missing, so the worker can only emit a degraded placeholder conclusion."
-                                : topCandidate == null
-                                ? "Provider evidence was collected, compressed, and indexed, but later phases are not implemented yet."
-                                : defaultIfBlank(topCandidate.reasoning(), "Phase-5 rule scoring completed and phase-6 compression finished, but later phases are not implemented yet.")
                 )),
-                buildRecommendations(collection, analysisMode, alert, topCandidate),
-                evidenceRefs,
-                compressedEvidence != null ? compressedEvidence.missingEvidence() : collection.missingEvidence(),
-                buildInsufficientEvidence(collection, ruleAnalysis, compressedEvidence),
+                List.of(new Recommendation(
+                        "P2",
+                        "MANUAL_CONFIRMATION",
+                        "Treat this result as a lifecycle-test artifact until stage-8 LLM integration is implemented.",
+                        alert.interfaceName()
+                )),
+                compressedEvidence.evidenceRefs(),
+                compressedEvidence.missingEvidence(),
+                compressedEvidence.insufficientEvidence(),
                 null,
-                llmUsed,
-                llmStatus,
-                effectiveDegraded,
-                providerDegraded,
-                effectiveDegradedReason,
-                effectiveDegraded ? 0.20 : 0.35,
+                true,
+                "SUCCESS",
+                degraded,
+                degraded,
+                degradedReason,
+                null,
+                degraded ? 0.35 : topCandidate == null ? 0.45 : topCandidate.confidence(),
                 Instant.now()
         );
-    }
-
-    private List<Recommendation> buildRecommendations(
-            ProviderCollectionResult collection,
-            AnalysisMode analysisMode,
-            AlertEvent alert,
-            CandidateRootCause topCandidate
-    ) {
-        List<Recommendation> recommendations = new ArrayList<>();
-        if (!collection.missingEvidence().isEmpty()) {
-            recommendations.add(new Recommendation(
-                    "P1",
-                    "CHECK_PROVIDER",
-                    "Inspect provider call logs and restore missing evidence sources before trusting the placeholder result.",
-                    collection.missingEvidence().get(0).providerName()
-            ));
-        }
-        recommendations.add(new Recommendation(
-                analysisMode == AnalysisMode.RULE_BASED_DEGRADED ? "P1" : "P2",
-                "FOLLOW_UP",
-                topCandidate == null
-                        ? "Continue with LLM and rule-fallback result generation to replace the current placeholder conclusion."
-                        : "Continue with LLM and rule-fallback result generation after reviewing the highest-scored phase-5 rule evidence.",
-                topCandidate == null || topCandidate.evidenceIds().isEmpty()
-                        ? alert.serviceName()
-                        : topCandidate.evidenceIds().get(0)
-        ));
-        return recommendations;
-    }
-
-    private List<EvidenceReference> buildEvidenceReferences(
-            ProviderCollectionResult collection,
-            RuleAnalysisEvidence ruleAnalysis
-    ) {
-        List<EvidenceReference> references = new ArrayList<>();
-        references.add(new EvidenceReference(
-                "provider.collection.window",
-                "PROVIDER_COLLECTION",
-                "Provider evidence was collected for the configured alarm window and persisted with call logs."
-        ));
-        if (collection.baselineEvidence().collected()) {
-            references.add(new EvidenceReference(
-                    "provider.collection.baseline",
-                    "BASELINE",
-                    "Historical baseline data was collected for the comparable time window."
-            ));
-        }
-        if (collection.interfaceLogEvidence().collected()) {
-            references.add(new EvidenceReference(
-                    "provider.collection.interfaceLogs",
-                    "INTERFACE_LOG",
-                    "Interface-log samples were collected and used to derive trace ids."
-            ));
-        }
-        if (collection.traceEvidence().collected()) {
-            references.add(new EvidenceReference(
-                    "provider.collection.traces",
-                    "TRACE",
-                    "Trace details were collected for sampled trace ids."
-            ));
-        }
-        if (collection.runtimeLogEvidence().collected()) {
-            references.add(new EvidenceReference(
-                    "provider.collection.runtimeLogs",
-                    "RUNTIME_LOG",
-                    "Runtime WARN/ERROR samples were collected for sampled trace ids."
-            ));
-        }
-        if (collection.metricEvidence().collected()) {
-            references.add(new EvidenceReference(
-                    "provider.collection.metrics",
-                    "METRIC",
-                    "Infrastructure metrics were collected for the service and mapped resources."
-            ));
-        }
-        if (!collection.missingEvidence().isEmpty()) {
-            references.add(new EvidenceReference(
-                    "provider.collection.missing",
-                    "MISSING_EVIDENCE",
-                    "One or more provider calls failed, timed out, or returned partial evidence."
-            ));
-        }
-        if (ruleAnalysis != null) {
-            references.addAll(ruleAnalysis.evidenceRefs());
-        }
-        return references;
-    }
-
-    private List<String> buildInsufficientEvidence(
-            ProviderCollectionResult collection,
-            RuleAnalysisEvidence ruleAnalysis,
-            CompressedEvidenceBundle compressedEvidence
-    ) {
-        List<String> insufficientEvidence = new ArrayList<>();
-        if (collection.degradedReason() != null && !collection.degradedReason().isBlank()) {
-            insufficientEvidence.add(collection.degradedReason());
-        }
-        if (compressedEvidence != null) {
-            insufficientEvidence.addAll(compressedEvidence.insufficientEvidence());
-        } else if (ruleAnalysis != null) {
-            insufficientEvidence.addAll(ruleAnalysis.insufficientEvidence());
-        }
-        insufficientEvidence.add("LLM and rule-fallback result generation remain placeholder-backed in the current implementation.");
-        return insufficientEvidence;
-    }
-
-    private String summarizeRuleStage(
-            boolean providerDegraded,
-            RuleAnalysisEvidence ruleAnalysis,
-            String suffix
-    ) {
-        String prefix = providerDegraded
-                ? "Provider collection completed with missing non-critical evidence."
-                : "Provider collection completed successfully.";
-        if (ruleAnalysis == null || ruleAnalysis.ruleFindings().isEmpty()) {
-            return prefix + " " + suffix;
-        }
-        return prefix
-                + " Phase-5 rule analysis generated findings: "
-                + String.join(", ", ruleAnalysis.topFindingTypes(3))
-                + ". "
-                + suffix;
     }
 
     private String defaultIfBlank(String value, String defaultValue) {

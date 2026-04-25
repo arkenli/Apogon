@@ -291,7 +291,7 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
-    void webhookCreatesTaskAndWorkerEventuallyCompletesPlaceholderLifecycle() throws Exception {
+    void webhookCreatesTaskAndWorkerEventuallyCompletesRuleFallbackLifecycle() throws Exception {
         String alertId = nextNumericAlertId();
         ResponseEntity<JsonNode> response = postWebhook(withAlertId(RATE_ALERT, alertId));
 
@@ -305,20 +305,26 @@ class AiopsAlertAnalysisApplicationTests {
         String taskId = data.path("taskId").asText();
         AnalysisJob task = waitForTerminalTask(taskId);
         assertThat(task.alertId()).isEqualTo(alertId);
-        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
         assertThat(task.category()).isEqualTo(AlertCategory.RPC_ERROR_RATE);
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT analysis_mode FROM aiops_analysis_result WHERE task_id = ?",
                 String.class,
                 taskId
-        )).isEqualTo("RULE_BASED_ONLY");
+        )).isEqualTo("RULE_BASED_DEGRADED");
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM aiops_analysis_job_state_log WHERE task_id = ?",
                 Integer.class,
                 taskId
-        )).isEqualTo(6);
+        )).isEqualTo(8);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT rule_engine_version FROM aiops_analysis_result WHERE task_id = ?",
+                String.class,
+                taskId
+        )).isEqualTo("fallback-rules-v1");
         JsonNode result = loadResultJson(taskId);
         assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("BUSINESS_ERROR_CODE_NOT_MASKED");
+        assertThat(result.path("llmStatus").asText()).isEqualTo("TIMEOUT");
         assertThat(result.path("evidenceRefs").toString()).contains("error.top.1", "uid.top.1");
     }
 
@@ -333,9 +339,10 @@ class AiopsAlertAnalysisApplicationTests {
         assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
 
         JsonNode result = loadResultJson(taskId);
-        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_ONLY");
+        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_DEGRADED");
         assertThat(result.path("degraded").asBoolean()).isTrue();
         assertThat(result.path("degradedByProviderFailure").asBoolean()).isTrue();
+        assertThat(result.path("llmStatus").asText()).isEqualTo("TIMEOUT");
         assertThat(result.path("missingEvidence").toString()).contains("runtimeLog");
         assertThat(jdbcTemplate.queryForObject(
                 """
@@ -378,16 +385,17 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
-    void webhookLatencyAlertPersistsTraceBasedRuleEvidenceInPlaceholderResult() throws Exception {
+    void webhookLatencyAlertPersistsTraceBasedRuleEvidenceInRuleFallbackResult() throws Exception {
         String alertId = nextNumericAlertId();
         ResponseEntity<JsonNode> response = postWebhook(withAlertId(LATENCY_ALERT, alertId));
 
         String taskId = response.getBody().path("data").path("taskId").asText();
         AnalysisJob task = waitForTerminalTask(taskId);
-        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
 
         JsonNode result = loadResultJson(taskId);
-        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_ONLY");
+        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_DEGRADED");
+        assertThat(result.path("llmStatus").asText()).isEqualTo("TIMEOUT");
         assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("DOWNSTREAM_RPC_LATENCY");
         assertThat(result.path("evidenceRefs").toString()).contains("trace.slow.1", "trace.slow.aggregation.1");
     }
@@ -452,6 +460,7 @@ class AiopsAlertAnalysisApplicationTests {
                 "SUCCESS",
                 false,
                 false,
+                null,
                 null,
                 0.78,
                 createdAt.plusSeconds(60)
