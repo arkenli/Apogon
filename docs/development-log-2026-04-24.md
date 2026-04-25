@@ -275,7 +275,7 @@ mvn test
 本次补充完成 `aiops-alert-analysis-development-plan.md` 中阶段 5 的主要内容，并将规则预分析相关代码按职责落入新的 `analysis.rule` 分层包。
 
 ### 范围说明
-
+1
 1. 严格按阶段 5 边界实现规则预分析，不提前实现阶段 6 的 `EvidenceCompressor` 和阶段 7 的完整规则降级结果生成。
 2. 不实现真实内网 Provider，继续复用阶段 4 的 Provider 接口与 Mock。
 3. 只在阶段 5 涉及的目录内新增或调整代码，未改动与本阶段无关的模块。
