@@ -4,8 +4,8 @@ import com.company.aiops.alert.model.AlertCategory;
 import com.company.aiops.alert.model.AlertEvent;
 import com.company.aiops.alert.model.AlertTriggerValues;
 import com.company.aiops.analysis.bundle.CompressedEvidenceBundle;
-import com.company.aiops.analysis.bundle.EvidenceCompressor;
 import com.company.aiops.analysis.bundle.EvidenceBundleType;
+import com.company.aiops.analysis.bundle.EvidenceCompressor;
 import com.company.aiops.analysis.bundle.StoredEvidenceBundle;
 import com.company.aiops.analysis.context.AnalysisContext;
 import com.company.aiops.analysis.context.AnalysisContextFactory;
@@ -32,6 +32,9 @@ import com.company.aiops.analysis.result.RootCauseHypothesis;
 import com.company.aiops.analysis.rule.RuleAnalysisService;
 import com.company.aiops.analysis.rule.RuleAnalysisTestFixtures;
 import com.company.aiops.analysis.rule.model.RuleAnalysisEvidence;
+import com.company.aiops.llm.client.LlmCallStatus;
+import com.company.aiops.llm.service.LlmAnalysisException;
+import com.company.aiops.llm.service.LlmAnalysisService;
 import com.company.aiops.persistence.repository.AlertEventRepository;
 import com.company.aiops.persistence.repository.EvidenceBundleRepository;
 import com.company.aiops.provider.model.ContainerMetrics;
@@ -62,7 +65,110 @@ import static org.mockito.Mockito.when;
 class AnalysisJobWorkerTests {
 
     @Test
-    void processTaskPersistsRuleAndCompressedBundlesBeforeCompleting() {
+    void processTaskPersistsRuleAndCompressedBundlesBeforeCompletingRuleOnlyResult() {
+        TestHarness harness = harness(false);
+        when(harness.ruleBasedFallbackAnalyzer.analyze(any(RuleBasedAnalysisRequest.class))).thenReturn(harness.ruleOnlyResult);
+        when(harness.completionService.complete(anyString(), any())).thenReturn(harness.analysisJob);
+
+        harness.worker.processTask("task-1", AnalysisWorkerScenario.RULE_BASED_ONLY);
+
+        ArgumentCaptor<StoredEvidenceBundle> bundleCaptor = ArgumentCaptor.forClass(StoredEvidenceBundle.class);
+        verify(harness.evidenceBundleRepository, org.mockito.Mockito.times(2)).save(bundleCaptor.capture());
+        assertThat(bundleCaptor.getAllValues())
+                .extracting(StoredEvidenceBundle::evidenceType)
+                .containsExactly(EvidenceBundleType.RULE, EvidenceBundleType.COMPRESSED);
+
+        ArgumentCaptor<RuleBasedAnalysisRequest> requestCaptor = ArgumentCaptor.forClass(RuleBasedAnalysisRequest.class);
+        verify(harness.ruleBasedFallbackAnalyzer).analyze(requestCaptor.capture());
+        RuleBasedAnalysisRequest request = requestCaptor.getValue();
+        assertThat(request.analysisMode()).isEqualTo(AnalysisMode.RULE_BASED_ONLY);
+        assertThat(request.llmStatus()).isEqualTo("DISABLED");
+        assertThat(request.compressedEvidence()).isEqualTo(harness.compressedEvidence);
+
+        ArgumentCaptor<AnalysisResult> resultCaptor = ArgumentCaptor.forClass(AnalysisResult.class);
+        verify(harness.completionService).complete(anyString(), resultCaptor.capture());
+        assertThat(resultCaptor.getValue()).isEqualTo(harness.ruleOnlyResult);
+    }
+
+    @Test
+    void processTaskDelegatesToLlmAnalysisServiceWhenConfiguredLlmScenarioIsSelected() {
+        TestHarness harness = harness(true);
+        when(harness.llmAnalysisService.analyze("task-1", harness.collection, harness.compressedEvidence))
+                .thenReturn(harness.llmAssistedResult);
+        when(harness.completionService.complete(anyString(), any())).thenReturn(harness.analysisJob);
+
+        harness.worker.processTask("task-1", AnalysisWorkerScenario.USE_CONFIGURED_LLM);
+
+        verify(harness.llmAnalysisService).analyze("task-1", harness.collection, harness.compressedEvidence);
+        ArgumentCaptor<AnalysisResult> resultCaptor = ArgumentCaptor.forClass(AnalysisResult.class);
+        verify(harness.completionService).complete(anyString(), resultCaptor.capture());
+        assertThat(resultCaptor.getValue()).isEqualTo(harness.llmAssistedResult);
+    }
+
+    @Test
+    void processTaskFallsBackWhenLlmAnalysisFails() {
+        TestHarness harness = harness(true);
+        when(harness.llmAnalysisService.analyze("task-1", harness.collection, harness.compressedEvidence))
+                .thenThrow(new LlmAnalysisException(LlmCallStatus.INVALID_JSON, "response is not valid JSON"));
+        when(harness.ruleBasedFallbackAnalyzer.analyze(any(RuleBasedAnalysisRequest.class))).thenReturn(harness.ruleFallbackResult);
+        when(harness.completionService.complete(anyString(), any())).thenReturn(harness.analysisJob);
+
+        harness.worker.processTask("task-1", AnalysisWorkerScenario.USE_CONFIGURED_LLM);
+
+        ArgumentCaptor<RuleBasedAnalysisRequest> requestCaptor = ArgumentCaptor.forClass(RuleBasedAnalysisRequest.class);
+        verify(harness.ruleBasedFallbackAnalyzer).analyze(requestCaptor.capture());
+        RuleBasedAnalysisRequest request = requestCaptor.getValue();
+        assertThat(request.analysisMode()).isEqualTo(AnalysisMode.RULE_BASED_DEGRADED);
+        assertThat(request.llmStatus()).isEqualTo("INVALID_JSON");
+        assertThat(request.degradedReason()).contains("INVALID_JSON");
+        verify(harness.completionService).complete("task-1", harness.ruleFallbackResult);
+    }
+
+    @Test
+    void submitUsesRuleOnlyScenarioWhenLlmIsDisabled() {
+        AnalysisJobWorker worker = spy(new AnalysisJobWorker(
+                RuleAnalysisTestFixtures.defaultProperties(),
+                mock(AnalysisJobStateMachine.class),
+                mock(AnalysisJobCompletionService.class),
+                mock(AlertEventRepository.class),
+                mock(AnalysisContextFactory.class),
+                mock(ProviderOrchestrator.class),
+                mock(RuleAnalysisService.class),
+                mock(EvidenceCompressor.class),
+                mock(EvidenceBundleRepository.class),
+                mock(RuleBasedFallbackAnalyzer.class),
+                mock(LlmAnalysisService.class)
+        ));
+        doNothing().when(worker).processTask("task-1", AnalysisWorkerScenario.RULE_BASED_ONLY);
+
+        worker.submit("task-1");
+
+        verify(worker).processTask("task-1", AnalysisWorkerScenario.RULE_BASED_ONLY);
+    }
+
+    @Test
+    void submitUsesConfiguredLlmScenarioWhenLlmIsEnabled() {
+        AnalysisJobWorker worker = spy(new AnalysisJobWorker(
+                propertiesWithLlmEnabled(true),
+                mock(AnalysisJobStateMachine.class),
+                mock(AnalysisJobCompletionService.class),
+                mock(AlertEventRepository.class),
+                mock(AnalysisContextFactory.class),
+                mock(ProviderOrchestrator.class),
+                mock(RuleAnalysisService.class),
+                mock(EvidenceCompressor.class),
+                mock(EvidenceBundleRepository.class),
+                mock(RuleBasedFallbackAnalyzer.class),
+                mock(LlmAnalysisService.class)
+        ));
+        doNothing().when(worker).processTask("task-2", AnalysisWorkerScenario.USE_CONFIGURED_LLM);
+
+        worker.submit("task-2");
+
+        verify(worker).processTask("task-2", AnalysisWorkerScenario.USE_CONFIGURED_LLM);
+    }
+
+    private TestHarness harness(boolean llmEnabled) {
         AnalysisJobStateMachine stateMachine = mock(AnalysisJobStateMachine.class);
         AnalysisJobCompletionService completionService = mock(AnalysisJobCompletionService.class);
         AlertEventRepository alertEventRepository = mock(AlertEventRepository.class);
@@ -72,6 +178,7 @@ class AnalysisJobWorkerTests {
         EvidenceCompressor evidenceCompressor = mock(EvidenceCompressor.class);
         EvidenceBundleRepository evidenceBundleRepository = mock(EvidenceBundleRepository.class);
         RuleBasedFallbackAnalyzer ruleBasedFallbackAnalyzer = mock(RuleBasedFallbackAnalyzer.class);
+        LlmAnalysisService llmAnalysisService = mock(LlmAnalysisService.class);
 
         AlertEvent alert = new AlertEvent(
                 "alert-1",
@@ -116,7 +223,7 @@ class AnalysisJobWorkerTests {
                 List.of(new MissingEvidence("runtimeLog", "timeout", false, "runtime log missing")),
                 true,
                 false,
-                null,
+                "Provider evidence is incomplete: runtimeLog (timeout).",
                 List.of()
         );
         RuleAnalysisEvidence ruleAnalysis = RuleAnalysisEvidence.empty();
@@ -147,7 +254,7 @@ class AnalysisJobWorkerTests {
                 collection.missingEvidence(),
                 List.of("phase-6 note")
         );
-        AnalysisResult analysisResult = new AnalysisResult(
+        AnalysisResult ruleOnlyResult = new AnalysisResult(
                 "task-1",
                 alert.alertId(),
                 alert.category(),
@@ -181,6 +288,74 @@ class AnalysisJobWorkerTests {
                 0.48,
                 Instant.now()
         );
+        AnalysisResult llmAssistedResult = new AnalysisResult(
+                "task-1",
+                alert.alertId(),
+                alert.category(),
+                AnalysisMode.LLM_ASSISTED,
+                "LLM-assisted analysis summary.",
+                new ImpactAssessment("LOW", "LLM-assisted impact assessment."),
+                List.of(new RootCauseHypothesis(
+                        "BUSINESS_ERROR_CODE_NOT_MASKED",
+                        "LLM concluded business validation failure is most likely.",
+                        0.77,
+                        List.of("alert.request.count"),
+                        "MERGED",
+                        "The validated LLM output reused compressed evidence ids."
+                )),
+                List.of(new Recommendation(
+                        "P1",
+                        "CHECK_LOG",
+                        "Inspect representative business validation errors.",
+                        alert.interfaceName()
+                )),
+                compressedEvidence.evidenceRefs(),
+                compressedEvidence.missingEvidence(),
+                List.of("phase-6 note"),
+                null,
+                true,
+                "SUCCESS",
+                true,
+                true,
+                "Provider evidence is incomplete: runtimeLog (timeout).",
+                null,
+                0.72,
+                Instant.now()
+        );
+        AnalysisResult ruleFallbackResult = new AnalysisResult(
+                "task-1",
+                alert.alertId(),
+                alert.category(),
+                AnalysisMode.RULE_BASED_DEGRADED,
+                "Fallback analysis summary.",
+                new ImpactAssessment("LOW", "Fallback impact assessment."),
+                List.of(new RootCauseHypothesis(
+                        "BUSINESS_ERROR_CODE_NOT_MASKED",
+                        "Fallback rules concluded business validation failure is most likely.",
+                        0.60,
+                        List.of("alert.request.count"),
+                        "RULE_ENGINE",
+                        "LLM output was invalid, so the deterministic fallback path was used."
+                )),
+                List.of(new Recommendation(
+                        "P1",
+                        "CHECK_LOG",
+                        "Inspect representative business validation errors.",
+                        alert.interfaceName()
+                )),
+                compressedEvidence.evidenceRefs(),
+                compressedEvidence.missingEvidence(),
+                List.of("phase-6 note"),
+                null,
+                false,
+                "INVALID_JSON",
+                true,
+                true,
+                "Provider evidence is incomplete: runtimeLog (timeout). LLM analysis failed with status INVALID_JSON. Switched to deterministic fallback rules.",
+                "fallback-rules-v1",
+                0.62,
+                Instant.now()
+        );
         AnalysisJob analysisJob = new AnalysisJob(
                 "task-1",
                 alert.alertId(),
@@ -203,11 +378,9 @@ class AnalysisJobWorkerTests {
         when(providerOrchestrator.collect("task-1", context)).thenReturn(collection);
         when(ruleAnalysisService.analyze(collection)).thenReturn(ruleAnalysis);
         when(evidenceCompressor.compress(collection, ruleAnalysis)).thenReturn(compressedEvidence);
-        when(ruleBasedFallbackAnalyzer.analyze(any(RuleBasedAnalysisRequest.class))).thenReturn(analysisResult);
-        when(completionService.complete(anyString(), any())).thenReturn(analysisJob);
 
         AnalysisJobWorker worker = new AnalysisJobWorker(
-                RuleAnalysisTestFixtures.defaultProperties(),
+                propertiesWithLlmEnabled(llmEnabled),
                 stateMachine,
                 completionService,
                 alertEventRepository,
@@ -216,69 +389,23 @@ class AnalysisJobWorkerTests {
                 ruleAnalysisService,
                 evidenceCompressor,
                 evidenceBundleRepository,
-                ruleBasedFallbackAnalyzer
+                ruleBasedFallbackAnalyzer,
+                llmAnalysisService
         );
-
-        worker.processTask("task-1", AnalysisWorkerScenario.RULE_BASED_ONLY);
-
-        ArgumentCaptor<StoredEvidenceBundle> bundleCaptor = ArgumentCaptor.forClass(StoredEvidenceBundle.class);
-        verify(evidenceBundleRepository, org.mockito.Mockito.times(2)).save(bundleCaptor.capture());
-        assertThat(bundleCaptor.getAllValues())
-                .extracting(StoredEvidenceBundle::evidenceType)
-                .containsExactly(EvidenceBundleType.RULE, EvidenceBundleType.COMPRESSED);
-
-        ArgumentCaptor<RuleBasedAnalysisRequest> requestCaptor = ArgumentCaptor.forClass(RuleBasedAnalysisRequest.class);
-        verify(ruleBasedFallbackAnalyzer).analyze(requestCaptor.capture());
-        RuleBasedAnalysisRequest request = requestCaptor.getValue();
-        assertThat(request.analysisMode()).isEqualTo(AnalysisMode.RULE_BASED_ONLY);
-        assertThat(request.llmStatus()).isEqualTo("DISABLED");
-        assertThat(request.compressedEvidence()).isEqualTo(compressedEvidence);
-
-        ArgumentCaptor<AnalysisResult> resultCaptor = ArgumentCaptor.forClass(AnalysisResult.class);
-        verify(completionService).complete(anyString(), resultCaptor.capture());
-        assertThat(resultCaptor.getValue()).isEqualTo(analysisResult);
-    }
-
-    @Test
-    void submitUsesRuleOnlyScenarioWhenLlmIsDisabled() {
-        AnalysisJobWorker worker = spy(new AnalysisJobWorker(
-                RuleAnalysisTestFixtures.defaultProperties(),
-                mock(AnalysisJobStateMachine.class),
-                mock(AnalysisJobCompletionService.class),
-                mock(AlertEventRepository.class),
-                mock(AnalysisContextFactory.class),
-                mock(ProviderOrchestrator.class),
-                mock(RuleAnalysisService.class),
-                mock(EvidenceCompressor.class),
-                mock(EvidenceBundleRepository.class),
-                mock(RuleBasedFallbackAnalyzer.class)
-        ));
-        doNothing().when(worker).processTask("task-1", AnalysisWorkerScenario.RULE_BASED_ONLY);
-
-        worker.submit("task-1");
-
-        verify(worker).processTask("task-1", AnalysisWorkerScenario.RULE_BASED_ONLY);
-    }
-
-    @Test
-    void submitUsesTimeoutFallbackScenarioWhenLlmIsEnabled() {
-        AnalysisJobWorker worker = spy(new AnalysisJobWorker(
-                propertiesWithLlmEnabled(true),
-                mock(AnalysisJobStateMachine.class),
-                mock(AnalysisJobCompletionService.class),
-                mock(AlertEventRepository.class),
-                mock(AnalysisContextFactory.class),
-                mock(ProviderOrchestrator.class),
-                mock(RuleAnalysisService.class),
-                mock(EvidenceCompressor.class),
-                mock(EvidenceBundleRepository.class),
-                mock(RuleBasedFallbackAnalyzer.class)
-        ));
-        doNothing().when(worker).processTask("task-2", AnalysisWorkerScenario.LLM_FALLBACK_TIMEOUT);
-
-        worker.submit("task-2");
-
-        verify(worker).processTask("task-2", AnalysisWorkerScenario.LLM_FALLBACK_TIMEOUT);
+        return new TestHarness(
+                worker,
+                stateMachine,
+                completionService,
+                ruleBasedFallbackAnalyzer,
+                llmAnalysisService,
+                evidenceBundleRepository,
+                analysisJob,
+                collection,
+                compressedEvidence,
+                ruleOnlyResult,
+                llmAssistedResult,
+                ruleFallbackResult
+        );
     }
 
     private com.company.aiops.common.config.AiopsProperties propertiesWithLlmEnabled(boolean enabled) {
@@ -293,9 +420,27 @@ class AnalysisJobWorkerTests {
                         1000,
                         Duration.ofSeconds(10),
                         true,
-                        "fallback-rules-v1"
+                        "fallback-rules-v1",
+                        null,
+                        null
                 ),
                 RuleAnalysisTestFixtures.defaultProperties().thresholds()
         );
+    }
+
+    private record TestHarness(
+            AnalysisJobWorker worker,
+            AnalysisJobStateMachine stateMachine,
+            AnalysisJobCompletionService completionService,
+            RuleBasedFallbackAnalyzer ruleBasedFallbackAnalyzer,
+            LlmAnalysisService llmAnalysisService,
+            EvidenceBundleRepository evidenceBundleRepository,
+            AnalysisJob analysisJob,
+            ProviderCollectionResult collection,
+            CompressedEvidenceBundle compressedEvidence,
+            AnalysisResult ruleOnlyResult,
+            AnalysisResult llmAssistedResult,
+            AnalysisResult ruleFallbackResult
+    ) {
     }
 }

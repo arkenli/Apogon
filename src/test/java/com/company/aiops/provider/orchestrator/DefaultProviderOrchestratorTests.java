@@ -247,7 +247,9 @@ class DefaultProviderOrchestratorTests {
                         1000,
                         Duration.ofSeconds(10),
                         true,
-                        "fallback-rules-v1"
+                        "fallback-rules-v1",
+                        null,
+                        null
                 ),
                 new AiopsProperties.Thresholds(0.8, 0.85, 0.8, 0.8, 0.8, 0.8, 0.85)
         );

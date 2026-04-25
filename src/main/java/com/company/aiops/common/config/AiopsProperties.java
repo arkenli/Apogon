@@ -56,7 +56,9 @@ public record AiopsProperties(
             @Min(1) int maxOutputTokens,
             @NotNull Duration timeout,
             boolean fallbackEnabled,
-            @NotBlank String fallbackRuleEngineVersion
+            @NotBlank String fallbackRuleEngineVersion,
+            String baseUrl,
+            String apiKey
     ) {
     }
 

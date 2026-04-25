@@ -8,6 +8,7 @@ import com.company.aiops.analysis.job.AnalysisJobStateLog;
 import com.company.aiops.analysis.job.AnalysisJobStatus;
 import com.company.aiops.analysis.orchestrator.worker.AnalysisJobWorker;
 import com.company.aiops.analysis.orchestrator.worker.AnalysisWorkerScenario;
+import com.company.aiops.llm.client.mock.MockLlmTokens;
 import com.company.aiops.persistence.repository.AlertEventRepository;
 import com.company.aiops.persistence.repository.AnalysisJobStateLogRepository;
 import com.company.aiops.persistence.repository.AnalysisTaskRepository;
@@ -47,6 +48,7 @@ class AnalysisJobStateMachineIntegrationTests {
     @BeforeEach
     void cleanDatabase() {
         jdbcTemplate.update("DELETE FROM aiops_analysis_job_state_log");
+        jdbcTemplate.update("DELETE FROM aiops_llm_call_log");
         jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
@@ -55,11 +57,11 @@ class AnalysisJobStateMachineIntegrationTests {
     }
 
     @Test
-    void workerDrivesSuccessfulLifecycleForSimulatedLlmBranch() {
+    void workerDrivesSuccessfulLifecycleForConfiguredLlmBranch() {
         String taskId = "task_success_" + System.nanoTime();
-        seedPendingTask(taskId, "alert_success_" + System.nanoTime(), AlertCategory.RPC_ERROR_RATE);
+        seedPendingTask(taskId, "alert_success_" + System.nanoTime(), AlertCategory.RPC_ERROR_RATE, "demo-service");
 
-        analysisJobWorker.processTask(taskId, AnalysisWorkerScenario.LLM_ASSISTED_SUCCESS);
+        analysisJobWorker.processTask(taskId, AnalysisWorkerScenario.USE_CONFIGURED_LLM);
 
         AnalysisJob task = analysisTaskRepository.findByTaskId(taskId).orElseThrow();
         assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
@@ -82,14 +84,24 @@ class AnalysisJobStateMachineIntegrationTests {
                 String.class,
                 taskId
         )).isEqualTo("LLM_ASSISTED");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT llm_status FROM aiops_analysis_result WHERE task_id = ?",
+                String.class,
+                taskId
+        )).isEqualTo("SUCCESS");
     }
 
     @Test
-    void workerDrivesDegradedLifecycleWhenLlmTimesOut() {
+    void workerDrivesDegradedLifecycleWhenLlmValidationFails() {
         String taskId = "task_degraded_" + System.nanoTime();
-        seedPendingTask(taskId, "alert_degraded_" + System.nanoTime(), AlertCategory.RPC_LATENCY);
+        seedPendingTask(
+                taskId,
+                "alert_degraded_" + System.nanoTime(),
+                AlertCategory.RPC_ERROR_RATE,
+                "demo-service-" + MockLlmTokens.INVALID_JSON
+        );
 
-        analysisJobWorker.processTask(taskId, AnalysisWorkerScenario.LLM_FALLBACK_TIMEOUT);
+        analysisJobWorker.processTask(taskId, AnalysisWorkerScenario.USE_CONFIGURED_LLM);
 
         AnalysisJob task = analysisTaskRepository.findByTaskId(taskId).orElseThrow();
         assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
@@ -112,16 +124,21 @@ class AnalysisJobStateMachineIntegrationTests {
                 taskId
         )).isEqualTo("RULE_BASED_DEGRADED");
         assertThat(jdbcTemplate.queryForObject(
-                "SELECT degraded FROM aiops_analysis_result WHERE task_id = ?",
+                "SELECT llm_status FROM aiops_analysis_result WHERE task_id = ?",
+                String.class,
+                taskId
+        )).isEqualTo("INVALID_JSON");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_llm_call_log WHERE task_id = ?",
                 Integer.class,
                 taskId
-        )).isEqualTo(1);
+        )).isEqualTo(2);
     }
 
     @Test
     void stateMachineRejectsIllegalTransition() {
         String taskId = "task_illegal_" + System.nanoTime();
-        seedPendingTask(taskId, "alert_illegal_" + System.nanoTime(), AlertCategory.RPC_ERROR_RATE);
+        seedPendingTask(taskId, "alert_illegal_" + System.nanoTime(), AlertCategory.RPC_ERROR_RATE, "demo-service");
 
         assertThatThrownBy(() -> analysisJobStateMachine.transition(
                 taskId,
@@ -136,14 +153,14 @@ class AnalysisJobStateMachineIntegrationTests {
         assertThat(analysisJobStateLogRepository.findByTaskId(taskId)).isEmpty();
     }
 
-    private void seedPendingTask(String taskId, String alertId, AlertCategory category) {
+    private void seedPendingTask(String taskId, String alertId, AlertCategory category, String serviceName) {
         Instant now = Instant.now();
         alertEventRepository.save(new AlertEvent(
                 alertId,
                 category,
                 "OPEN",
                 "MAJOR",
-                "demo-service",
+                serviceName,
                 "demo.Interface.query",
                 "cluster1",
                 "cn_product_default",
@@ -162,7 +179,7 @@ class AnalysisJobStateMachineIntegrationTests {
                 taskId,
                 alertId,
                 category,
-                category.name() + "|demo-service|demo.Interface.query|cluster1",
+                category.name() + "|" + serviceName + "|demo.Interface.query|cluster1",
                 AnalysisJobStatus.PENDING,
                 null,
                 "analysis task accepted",

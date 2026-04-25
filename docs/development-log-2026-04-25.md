@@ -202,3 +202,145 @@ com.company.aiops.analysis
 2. 基于阶段 6 压缩证据构建 Prompt，并校验输出中的 `evidenceIds`。
 3. 将当前“模拟 TIMEOUT”路径替换为真实 LLM 调用失败后的降级分支。
 4. 落地 `aiops_llm_call_log` 写入，并补齐阶段 8 的集成测试。
+
+---
+
+## 补充记录：阶段 8 LLM 集成
+
+本次补充完成 `aiops-alert-analysis-development-plan.md` 中阶段 8 的主要内容，并将阶段 7 中留在 worker 内的“模拟 LLM 成功 / 模拟 LLM 超时”占位路径替换为真实的阶段 8 编排：Prompt 构造、LLM Client 选择、输出校验、一次重试、调用日志落库，以及失败后的规则降级。
+
+### 范围说明
+
+1. 严格按阶段 8 边界实现 `LlmClient` / `PromptBuilder` / `LlmOutputValidator` / `LlmAnalysisService` / `aiops_llm_call_log`。
+2. 不实现真实内网 Provider，继续复用既有 Provider 接口与 Mock。
+3. 不接真实内网模型；默认运行配置切到 `mock`，仅保留 `OpenAI-compatible` 适配器接口与最小实现骨架。
+4. 只修改阶段 8 直接涉及的 `analysis.orchestrator.worker` / `llm` / `persistence.repository` / `common.config` / `test` 目录，并同步整理职责边界。
+
+### 设计冲突说明
+
+本次实现前确认到 2 个与阶段 8 直接相关的冲突：
+
+1. 设计文档与既有默认配置将 `aiops.llm.provider` 指向 `openai-compatible`，但当前任务约束要求本地只实现接口与 Mock，不接真实外部模型端点；同时原配置也缺少真实适配所需的 `baseUrl` / `apiKey`。
+2. 设计文档 12.7 后的说明写的是“LLM 生成的 rootCause 补 `source=LLM`”，但设计文档第 20 章的正常示例输出又使用 `source=MERGED`；当前 `AnalysisResult` 也更接近最终合并视图而非原始模型输出。
+
+最小修改建议：
+
+1. 在文档和配置中明确：阶段 8 本地默认 provider 为 `mock`；`openai-compatible` 仅作为可选适配器，需要额外补充 `baseUrl` / `apiKey` 后才允许启用。
+2. 在文档中补充区分“原始 LLM payload”与“最终 AnalysisResult”：前者可视为 `LLM`，后者在系统合并证据和外层字段后允许使用 `MERGED`。
+
+### 本次完成内容
+
+1. 新增 `llm` 分层目录，明确阶段 8 职责拆分：
+   - `llm.client`
+   - `llm.client.mock`
+   - `llm.client.openai`
+   - `llm.prompt`
+   - `llm.schema`
+   - `llm.validator`
+   - `llm.service`
+2. 定义并实现 LLM 调用抽象：
+   - `LlmClient`
+   - `LlmRequest`
+   - `LlmResponse`
+   - `LlmMessage`
+   - `LlmCallStatus`
+   - `LlmClientException`
+3. 实现 `MockLlmClient`：
+   - 基于阶段 6 的 `CompressedEvidenceBundle` 生成稳定 JSON 输出
+   - 支持通过 serviceName token 稳定复现 `TIMEOUT`、`INVALID_JSON`、`SCHEMA_VALIDATION_FAILED`、`INVALID_EVIDENCE_REFERENCE` 和“首轮失败、重试成功”等场景
+4. 实现 `OpenAiCompatibleLlmClient` 最小适配骨架：
+   - 通过 `RestClient` 发送 OpenAI-compatible 请求
+   - 未配置 `baseUrl` / `apiKey` 时显式返回 `UNAVAILABLE`
+   - 不作为当前默认运行路径
+5. 实现 Prompt 构造：
+   - `RpcErrorRatePromptBuilder`
+   - `RpcLatencyPromptBuilder`
+   - 支持在首次校验失败后，向唯一一次重试请求追加格式修复提示
+6. 实现输出校验：
+   - `DefaultLlmOutputValidator`
+   - 校验 JSON 可解析
+   - 校验必填字段、数组上限、枚举和值域
+   - 校验 `rootCauses[*].evidenceIds` 必须存在于压缩证据包
+   - 未知 `causeType` 统一映射为 `UNKNOWN`
+7. 实现 `DefaultLlmAnalysisService`：
+   - 根据 `aiops.llm.provider` 选择 `LlmClient`
+   - 根据告警类别选择 `PromptBuilder`
+   - 实现“失败后最多重试一次”的阶段 8 规则
+   - 成功时生成真实 `LLM_ASSISTED` 结果
+   - 失败时向 worker 抛出规范化 `LlmAnalysisException`，由 worker 转入 `RULE_BASED_DEGRADED`
+8. 落地 `aiops_llm_call_log`：
+   - 新增 `LlmCallLogRepository`
+   - 新增 `JdbcLlmCallLogRepository`
+   - 记录 request / response / tokens / latency / callStatus / errorMessage / expireAt
+9. 重构 `AnalysisJobWorker`：
+   - 删除阶段 7 遗留的 `LLM_ASSISTED_SUCCESS` / `LLM_FALLBACK_TIMEOUT` 模拟分支
+   - 将 `LLM_ANALYZING -> GENERATING_RESULT` 的正常路径接到真实 `LlmAnalysisService`
+   - 将 LLM 校验失败或调用失败后的路径接到真实规则降级分支
+10. 补充和更新公共类型、复杂流程与包级注释，避免阶段 8 的新目录再次出现职责混放。
+
+### 本次包结构整理
+
+根据“若当前任务涉及目录存在职责混放，必须在本次提交中一并整理”的约束，本次将阶段 8 的新增职责固定到独立目录：
+
+```text
+com.company.aiops
+  analysis.orchestrator.worker   # 生命周期编排，只保留状态推进与分支控制
+  llm.client                     # 模型调用抽象
+  llm.client.mock                # Mock LLM
+  llm.client.openai              # OpenAI-compatible 适配骨架
+  llm.prompt                     # 分类 Prompt 构造
+  llm.schema                     # 阶段 8 输出约束
+  llm.validator                  # JSON / schema / evidenceId 校验
+  llm.service                    # 阶段 8 总编排
+  persistence.repository         # LLM 调用日志仓储接口
+  persistence.repository.jdbc    # LLM 调用日志 JDBC 实现
+```
+
+本次没有把 Prompt、校验、重试、日志记录继续堆进 `AnalysisJobWorker` 或 `analysis.result`，避免生命周期编排、模型调用和结果建模继续耦合。
+
+### 测试与验证
+
+新增或更新测试：
+
+1. `DefaultLlmOutputValidatorTests`
+   - 验证未知 `causeType` 会映射为 `UNKNOWN`
+   - 验证不存在的 `evidenceId` 会被拒绝
+2. `DefaultLlmAnalysisServiceTests`
+   - 验证首次 `INVALID_JSON` 后会重试一次
+   - 验证重试成功后返回真实 `LLM_ASSISTED`
+3. `AnalysisJobWorkerTests`
+   - 验证 worker 会将阶段 8 正常路径委托给 `LlmAnalysisService`
+   - 验证 LLM 失败后会进入 `RuleBasedFallbackAnalyzer`
+   - 验证 `submit()` 会根据 `aiops.llm.enabled` 选择 `RULE_BASED_ONLY` 或 `USE_CONFIGURED_LLM`
+4. `AnalysisJobStateMachineIntegrationTests`
+   - 验证真实 `LLM_ASSISTED` 生命周期
+   - 验证 `INVALID_JSON` 两次失败后转入 `RULE_BASED_DEGRADED`
+   - 验证 `aiops_llm_call_log` 写入次数
+5. `AiopsAlertAnalysisApplicationTests`
+   - 验证默认 webhook 正常路径返回 `LLM_ASSISTED`
+   - 验证非关键 Provider 失败时仍允许 `LLM_ASSISTED`，但结果带 `degraded=true`
+   - 验证关键 Provider 缺失时不进入 LLM
+   - 验证 `INVALID_JSON` 重试失败后返回 `RULE_BASED_DEGRADED`
+
+验证情况：
+
+1. 已执行 `mvn -q -DskipTests test-compile`，通过。
+2. 已执行 `mvn test`，41 个测试全部通过。
+
+### 当前注意事项
+
+1. 阶段 8 已完成真实 LLM 编排，但当前默认仍只走 `MockLlmClient`；这满足当前任务约束，不代表已接入真实外部模型。
+2. `OpenAiCompatibleLlmClient` 仅为适配骨架；若后续要启用真实端点，需明确补齐 `baseUrl` / `apiKey`、环境隔离和脱敏审计策略。
+3. 当前已严格校验 `evidenceIds`，但设计文档中“输出不得出现证据包外的 serviceName / interfaceName / traceId / errorCode / resourceId”仍缺少完全结构化的可机校字段，后续若要做严格校验，建议先把这些引用升级为显式结构字段。
+4. 全量测试仍依赖本地 MySQL；重启机器后需先按 `LOCAL_MYSQL.md` 启动 `C:\aiops-mysql` 实例。
+
+### 下一步建议
+
+下一阶段应进入阶段 9：查询接口。
+
+建议优先做：
+
+1. 实现 `GET /api/v1/analysis/tasks/{taskId}` 和 `GET /api/v1/analysis/latest`。
+2. 让查询接口完整返回 `analysisMode`、`degraded`、`degradedReason`、`degradedByProviderFailure`、`missingEvidence`、`rootCauses`、`recommendations`。
+3. 补齐 `aiops_llm_call_log` 与最终结果的联查调试能力，方便后续排查模型输出问题。
+4. 在进入真实模型接入前，先把文档中的 provider 默认值、`source` 语义和阶段编号冲突收敛掉。

@@ -127,6 +127,7 @@ class AiopsAlertAnalysisApplicationTests {
     @BeforeEach
     void cleanDatabase() {
         jdbcTemplate.update("DELETE FROM aiops_analysis_job_state_log");
+        jdbcTemplate.update("DELETE FROM aiops_llm_call_log");
         jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
@@ -138,6 +139,7 @@ class AiopsAlertAnalysisApplicationTests {
     void contextLoads() {
         assertThat(aiopsProperties.analysis().dedupeWindow()).isEqualTo(Duration.ofMinutes(5));
         assertThat(aiopsProperties.llm().enabled()).isTrue();
+        assertThat(aiopsProperties.llm().provider()).isEqualTo("mock");
         assertThat(aiopsProperties.provider().parallelEnabled()).isTrue();
     }
 
@@ -291,7 +293,7 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
-    void webhookCreatesTaskAndWorkerEventuallyCompletesRuleFallbackLifecycle() throws Exception {
+    void webhookCreatesTaskAndWorkerEventuallyCompletesLlmLifecycle() throws Exception {
         String alertId = nextNumericAlertId();
         ResponseEntity<JsonNode> response = postWebhook(withAlertId(RATE_ALERT, alertId));
 
@@ -305,27 +307,27 @@ class AiopsAlertAnalysisApplicationTests {
         String taskId = data.path("taskId").asText();
         AnalysisJob task = waitForTerminalTask(taskId);
         assertThat(task.alertId()).isEqualTo(alertId);
-        assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
         assertThat(task.category()).isEqualTo(AlertCategory.RPC_ERROR_RATE);
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT analysis_mode FROM aiops_analysis_result WHERE task_id = ?",
                 String.class,
                 taskId
-        )).isEqualTo("RULE_BASED_DEGRADED");
+        )).isEqualTo("LLM_ASSISTED");
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM aiops_analysis_job_state_log WHERE task_id = ?",
                 Integer.class,
                 taskId
-        )).isEqualTo(8);
-        assertThat(jdbcTemplate.queryForObject(
-                "SELECT rule_engine_version FROM aiops_analysis_result WHERE task_id = ?",
-                String.class,
-                taskId
-        )).isEqualTo("fallback-rules-v1");
+        )).isEqualTo(7);
         JsonNode result = loadResultJson(taskId);
-        assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("BUSINESS_ERROR_CODE_NOT_MASKED");
-        assertThat(result.path("llmStatus").asText()).isEqualTo("TIMEOUT");
-        assertThat(result.path("evidenceRefs").toString()).contains("error.top.1", "uid.top.1");
+        assertThat(result.path("rootCauses").toString()).contains("LOW_TRAFFIC_LIMITED_IMPACT", "BUSINESS_ERROR_CODE_NOT_MASKED");
+        assertThat(result.path("llmStatus").asText()).isEqualTo("SUCCESS");
+        assertThat(result.path("llmUsed").asBoolean()).isTrue();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_llm_call_log WHERE task_id = ? AND call_status = 'SUCCESS'",
+                Integer.class,
+                taskId
+        )).isEqualTo(1);
     }
 
     @Test
@@ -339,10 +341,10 @@ class AiopsAlertAnalysisApplicationTests {
         assertThat(task.status()).isEqualTo(AnalysisJobStatus.DEGRADED_SUCCESS);
 
         JsonNode result = loadResultJson(taskId);
-        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_DEGRADED");
+        assertThat(result.path("analysisMode").asText()).isEqualTo("LLM_ASSISTED");
         assertThat(result.path("degraded").asBoolean()).isTrue();
         assertThat(result.path("degradedByProviderFailure").asBoolean()).isTrue();
-        assertThat(result.path("llmStatus").asText()).isEqualTo("TIMEOUT");
+        assertThat(result.path("llmStatus").asText()).isEqualTo("SUCCESS");
         assertThat(result.path("missingEvidence").toString()).contains("runtimeLog");
         assertThat(jdbcTemplate.queryForObject(
                 """
@@ -355,6 +357,11 @@ class AiopsAlertAnalysisApplicationTests {
                 Integer.class,
                 taskId
         )).isGreaterThan(0);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_llm_call_log WHERE task_id = ? AND call_status = 'SUCCESS'",
+                Integer.class,
+                taskId
+        )).isEqualTo(1);
     }
 
     @Test
@@ -373,6 +380,11 @@ class AiopsAlertAnalysisApplicationTests {
         assertThat(result.path("degradedByProviderFailure").asBoolean()).isTrue();
         assertThat(result.path("missingEvidence").toString()).contains("interfaceLog");
         assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_llm_call_log WHERE task_id = ?",
+                Integer.class,
+                taskId
+        )).isEqualTo(0);
+        assertThat(jdbcTemplate.queryForObject(
                 """
                         SELECT COUNT(*)
                         FROM aiops_analysis_job_state_log
@@ -385,9 +397,30 @@ class AiopsAlertAnalysisApplicationTests {
     }
 
     @Test
-    void webhookLatencyAlertPersistsTraceBasedRuleEvidenceInRuleFallbackResult() throws Exception {
+    void webhookLatencyAlertPersistsTraceBasedLlmResult() throws Exception {
         String alertId = nextNumericAlertId();
         ResponseEntity<JsonNode> response = postWebhook(withAlertId(LATENCY_ALERT, alertId));
+
+        String taskId = response.getBody().path("data").path("taskId").asText();
+        AnalysisJob task = waitForTerminalTask(taskId);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
+
+        JsonNode result = loadResultJson(taskId);
+        assertThat(result.path("analysisMode").asText()).isEqualTo("LLM_ASSISTED");
+        assertThat(result.path("llmStatus").asText()).isEqualTo("SUCCESS");
+        assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("DOWNSTREAM_RPC_LATENCY");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_llm_call_log WHERE task_id = ? AND call_status = 'SUCCESS'",
+                Integer.class,
+                taskId
+        )).isEqualTo(1);
+    }
+
+    @Test
+    void webhookRetriesInvalidJsonOnceAndFallsBackToRuleAnalysis() throws Exception {
+        String alertId = nextNumericAlertId();
+        String serviceName = "ams_front_" + System.nanoTime() + "_mock-llm-invalid-json";
+        ResponseEntity<JsonNode> response = postWebhook(withServiceName(withAlertId(RATE_ALERT, alertId), serviceName));
 
         String taskId = response.getBody().path("data").path("taskId").asText();
         AnalysisJob task = waitForTerminalTask(taskId);
@@ -395,9 +428,22 @@ class AiopsAlertAnalysisApplicationTests {
 
         JsonNode result = loadResultJson(taskId);
         assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_DEGRADED");
-        assertThat(result.path("llmStatus").asText()).isEqualTo("TIMEOUT");
-        assertThat(result.path("rootCauses").get(0).path("causeType").asText()).isEqualTo("DOWNSTREAM_RPC_LATENCY");
-        assertThat(result.path("evidenceRefs").toString()).contains("trace.slow.1", "trace.slow.aggregation.1");
+        assertThat(result.path("llmStatus").asText()).isEqualTo("INVALID_JSON");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM aiops_llm_call_log WHERE task_id = ?",
+                Integer.class,
+                taskId
+        )).isEqualTo(2);
+        assertThat(jdbcTemplate.queryForObject(
+                """
+                        SELECT COUNT(*)
+                        FROM aiops_llm_call_log
+                        WHERE task_id = ?
+                          AND call_status = 'INVALID_JSON'
+                        """,
+                Integer.class,
+                taskId
+        )).isEqualTo(2);
     }
 
     @Test

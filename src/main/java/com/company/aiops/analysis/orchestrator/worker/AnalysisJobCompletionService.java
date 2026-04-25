@@ -46,7 +46,9 @@ public class AnalysisJobCompletionService {
 
     private String completionReason(AnalysisResult analysisResult) {
         return switch (analysisResult.analysisMode()) {
-            case LLM_ASSISTED -> "simulated LLM-assisted result persisted for lifecycle validation";
+            case LLM_ASSISTED -> analysisResult.degraded()
+                    ? "stage-8 LLM-assisted result persisted with partial provider evidence"
+                    : "stage-8 LLM-assisted result persisted after prompt/validation completed";
             case RULE_BASED_DEGRADED -> "stage-7 degraded rule-based result persisted after provider or LLM fallback";
             case RULE_BASED_ONLY -> analysisResult.degraded()
                     ? "stage-7 rule-only result persisted with partial provider evidence"
