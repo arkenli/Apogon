@@ -46,11 +46,11 @@ public class AnalysisJobCompletionService {
 
     private String completionReason(AnalysisResult analysisResult) {
         return switch (analysisResult.analysisMode()) {
-            case LLM_ASSISTED -> "provider- and rule-backed placeholder LLM-assisted result persisted";
-            case RULE_BASED_DEGRADED -> "provider-triggered degraded placeholder result persisted";
+            case LLM_ASSISTED -> "phase-6 compressed evidence persisted and placeholder LLM-assisted result generated";
+            case RULE_BASED_DEGRADED -> "degraded result persisted after provider or LLM fallback branch";
             case RULE_BASED_ONLY -> analysisResult.degraded()
-                    ? "provider- and rule-backed placeholder result persisted with non-critical missing evidence"
-                    : "provider- and rule-backed placeholder rule-only result persisted";
+                    ? "phase-6 compressed evidence persisted with non-critical missing evidence and placeholder rule-only result generated"
+                    : "phase-6 compressed evidence persisted and placeholder rule-only result generated";
         };
     }
 }
