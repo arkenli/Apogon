@@ -5,7 +5,7 @@
  * payloads, collected evidence, and orchestration code do not accumulate in one directory. The
  * current implementation keeps those concerns under {@code analysis.job},
  * {@code analysis.context}, {@code analysis.evidence}, {@code analysis.bundle},
- * {@code analysis.rule}, {@code analysis.fallback}, {@code analysis.result}, and
- * {@code analysis.orchestrator}.</p>
+ * {@code analysis.rule}, {@code analysis.fallback}, {@code analysis.result},
+ * {@code analysis.query}, and {@code analysis.orchestrator}.</p>
  */
 package com.company.aiops.analysis;
