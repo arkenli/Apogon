@@ -51,6 +51,7 @@ class AnalysisJobStateMachineIntegrationTests {
         jdbcTemplate.update("DELETE FROM aiops_llm_call_log");
         jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
+        jdbcTemplate.update("DELETE FROM aiops_evidence_bundle");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
         jdbcTemplate.update("DELETE FROM aiops_analysis_task");
         jdbcTemplate.update("DELETE FROM aiops_alert_event");

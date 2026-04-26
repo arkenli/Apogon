@@ -28,6 +28,7 @@ import com.company.aiops.provider.model.ResourceMapping;
 import com.company.aiops.provider.model.RuntimeLogEntry;
 import com.company.aiops.provider.resource.ResourceMappingProvider;
 import com.company.aiops.provider.trace.TraceProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -38,6 +39,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -67,6 +69,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
     private final TraceProvider traceProvider;
     private final RuntimeLogProvider runtimeLogProvider;
     private final MetricProvider metricProvider;
+    private final Executor providerOrchestratorExecutor;
 
     public DefaultProviderOrchestrator(
             AiopsProperties aiopsProperties,
@@ -76,7 +79,8 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
             InterfaceLogProvider interfaceLogProvider,
             TraceProvider traceProvider,
             RuntimeLogProvider runtimeLogProvider,
-            MetricProvider metricProvider
+            MetricProvider metricProvider,
+            @Qualifier("providerOrchestratorExecutor") Executor providerOrchestratorExecutor
     ) {
         this.aiopsProperties = aiopsProperties;
         this.providerCallExecutor = providerCallExecutor;
@@ -86,6 +90,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
         this.traceProvider = traceProvider;
         this.runtimeLogProvider = runtimeLogProvider;
         this.metricProvider = metricProvider;
+        this.providerOrchestratorExecutor = providerOrchestratorExecutor;
     }
 
     @Override
@@ -248,7 +253,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
         if (!aiopsProperties.provider().parallelEnabled()) {
             return CompletableFuture.completedFuture(supplier.get());
         }
-        return CompletableFuture.supplyAsync(supplier);
+        return CompletableFuture.supplyAsync(supplier, providerOrchestratorExecutor);
     }
 
     private <T> ProviderResult<T> execute(

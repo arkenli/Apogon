@@ -44,11 +44,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DefaultProviderOrchestratorTests {
 
     private ThreadPoolTaskExecutor providerExecutor;
+    private ThreadPoolTaskExecutor providerOrchestratorExecutor;
 
     @AfterEach
     void tearDown() {
         if (providerExecutor != null) {
             providerExecutor.shutdown();
+        }
+        if (providerOrchestratorExecutor != null) {
+            providerOrchestratorExecutor.shutdown();
         }
     }
 
@@ -170,6 +174,12 @@ class DefaultProviderOrchestratorTests {
         providerExecutor.setQueueCapacity(32);
         providerExecutor.setThreadNamePrefix("test-provider-");
         providerExecutor.initialize();
+        providerOrchestratorExecutor = new ThreadPoolTaskExecutor();
+        providerOrchestratorExecutor.setCorePoolSize(8);
+        providerOrchestratorExecutor.setMaxPoolSize(8);
+        providerOrchestratorExecutor.setQueueCapacity(32);
+        providerOrchestratorExecutor.setThreadNamePrefix("test-provider-orchestrator-");
+        providerOrchestratorExecutor.initialize();
         ProviderCallExecutor providerCallExecutor = new ProviderCallExecutor(properties, providerCallLogRepository, providerExecutor);
         return new DefaultProviderOrchestrator(
                 properties,
@@ -179,7 +189,8 @@ class DefaultProviderOrchestratorTests {
                 interfaceLogProvider,
                 traceProvider,
                 runtimeLogProvider,
-                metricProvider
+                metricProvider,
+                providerOrchestratorExecutor
         );
     }
 
@@ -230,7 +241,8 @@ class DefaultProviderOrchestratorTests {
                         50,
                         500,
                         10,
-                        10
+                        10,
+                        5
                 ),
                 new AiopsProperties.Provider(
                         Duration.ofSeconds(1),

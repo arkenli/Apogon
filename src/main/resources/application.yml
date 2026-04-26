@@ -33,6 +33,7 @@ aiops:
     runtime-log-message-max-chars: 500
     max-error-code-size: 10
     max-uid-size: 10
+    history-query-max-limit: 5
 
   provider:
     timeout: PT10S

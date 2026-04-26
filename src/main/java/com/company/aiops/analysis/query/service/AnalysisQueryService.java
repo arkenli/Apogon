@@ -18,10 +18,9 @@ import java.util.List;
 /**
  * Read-only facade for the phase-9 query endpoints.
  *
- * <p>The service keeps transport-facing payload assembly out of the JDBC layer and also patches the
- * current implementation gap where {@code historicalReference} is not yet persisted into
- * {@code aiops_analysis_result}. For completed tasks the value is recomputed from the task's
- * dedupe window when absent from the stored result.</p>
+ * <p>The service keeps transport-facing payload assembly out of the JDBC layer. Newly generated
+ * results now persist {@code historicalReference} directly at completion time; the lookup fallback
+ * remains only for older rows created before that change.</p>
  */
 @Service
 public class AnalysisQueryService {
@@ -63,6 +62,7 @@ public class AnalysisQueryService {
      * Returns completed historical results ordered by {@code generated_at desc}.
      */
     public List<AnalysisTaskQueryResponse> getHistory(String serviceName, String interfaceName, int limit) {
+        validateHistoryLimit(limit);
         return analysisQueryRepository.findHistoryByServiceAndInterface(serviceName, interfaceName, limit)
                 .stream()
                 .map(this::toResponse)
@@ -114,5 +114,15 @@ public class AnalysisQueryService {
 
     private AiopsException notFound(String message) {
         return new AiopsException(ErrorCode.NOT_FOUND, message);
+    }
+
+    private void validateHistoryLimit(int limit) {
+        int maxLimit = aiopsProperties.analysis().historyQueryMaxLimit();
+        if (limit > maxLimit) {
+            throw new AiopsException(
+                    ErrorCode.VALIDATION_FAILED,
+                    "history limit exceeds configured maximum: " + maxLimit
+            );
+        }
     }
 }

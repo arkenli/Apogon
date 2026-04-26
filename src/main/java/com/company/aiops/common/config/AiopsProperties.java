@@ -35,7 +35,8 @@ public record AiopsProperties(
             @Min(1) int maxRuntimeLogSize,
             @Min(1) int runtimeLogMessageMaxChars,
             @Min(1) int maxErrorCodeSize,
-            @Min(1) int maxUidSize
+            @Min(1) int maxUidSize,
+            @Min(1) int historyQueryMaxLimit
     ) {
     }
 

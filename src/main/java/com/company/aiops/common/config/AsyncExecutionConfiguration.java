@@ -43,4 +43,22 @@ public class AsyncExecutionConfiguration {
         executor.initialize();
         return executor;
     }
+
+    /**
+     * Orchestrator scheduling should also stay off the JDK common pool. These wrapper tasks wait on
+     * provider futures and therefore use a dedicated coordination pool instead of borrowing request
+     * threads or unrelated shared executors.
+     */
+    @Bean(name = "providerOrchestratorExecutor")
+    public ThreadPoolTaskExecutor providerOrchestratorExecutor(AiopsProperties aiopsProperties) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(200);
+        executor.setThreadNamePrefix("provider-orchestrator-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds((int) aiopsProperties.analysis().asyncTimeout().toSeconds());
+        executor.initialize();
+        return executor;
+    }
 }

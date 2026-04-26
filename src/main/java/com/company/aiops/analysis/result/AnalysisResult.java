@@ -30,4 +30,33 @@ public record AnalysisResult(
         double overallConfidence,
         Instant generatedAt
 ) {
+
+    /**
+     * Returns a copy with the persisted historical reference attached. Completion-stage enrichment
+     * uses this to keep the stored result JSON and the query payload structurally identical.
+     */
+    public AnalysisResult withHistoricalReference(HistoricalReference nextHistoricalReference) {
+        return new AnalysisResult(
+                taskId,
+                alertId,
+                category,
+                analysisMode,
+                summary,
+                impact,
+                rootCauses,
+                recommendations,
+                evidenceRefs,
+                missingEvidence,
+                insufficientEvidence,
+                nextHistoricalReference,
+                llmUsed,
+                llmStatus,
+                degraded,
+                degradedByProviderFailure,
+                degradedReason,
+                ruleEngineVersion,
+                overallConfidence,
+                generatedAt
+        );
+    }
 }

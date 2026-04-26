@@ -64,6 +64,7 @@ class AnalysisQueryControllerIntegrationTests {
         jdbcTemplate.update("DELETE FROM aiops_llm_call_log");
         jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
         jdbcTemplate.update("DELETE FROM aiops_duplicate_alert_link");
+        jdbcTemplate.update("DELETE FROM aiops_evidence_bundle");
         jdbcTemplate.update("DELETE FROM aiops_analysis_result");
         jdbcTemplate.update("DELETE FROM aiops_analysis_task");
         jdbcTemplate.update("DELETE FROM aiops_alert_event");
@@ -184,6 +185,18 @@ class AnalysisQueryControllerIntegrationTests {
     }
 
     @Test
+    void historyEndpointRejectsLimitAboveConfiguredMaximum() {
+        ResponseEntity<JsonNode> response = restTemplate.getForEntity(
+                "/api/v1/analysis/history?serviceName=history-service&interfaceName=history.Interface.query&limit=6",
+                JsonNode.class
+        );
+
+        assertThat(response.getStatusCode().is4xxClientError()).isTrue();
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().path("code").asText()).isEqualTo("VALIDATION_FAILED");
+    }
+
+    @Test
     void historyEndpointReturnsResultsSortedByGeneratedAtDescending() {
         Instant olderCreatedAt = Instant.parse("2026-04-26T00:00:00Z");
         Instant newerCreatedAt = Instant.parse("2026-04-26T05:00:00Z");
@@ -227,7 +240,7 @@ class AnalysisQueryControllerIntegrationTests {
         ));
 
         ResponseEntity<JsonNode> response = restTemplate.getForEntity(
-                "/api/v1/analysis/history?serviceName=history-service&interfaceName=history.Interface.query&limit=10",
+                "/api/v1/analysis/history?serviceName=history-service&interfaceName=history.Interface.query&limit=5",
                 JsonNode.class
         );
 

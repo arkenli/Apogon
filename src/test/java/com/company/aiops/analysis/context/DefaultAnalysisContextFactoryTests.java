@@ -59,7 +59,8 @@ class DefaultAnalysisContextFactoryTests {
                         50,
                         500,
                         10,
-                        10
+                        10,
+                        5
                 ),
                 new AiopsProperties.Provider(
                         Duration.ofSeconds(1),

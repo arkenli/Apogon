@@ -123,6 +123,19 @@ class AnalysisQueryServiceTests {
                 .isEqualTo(ErrorCode.NOT_FOUND);
     }
 
+    @Test
+    void getHistoryRejectsLimitAboveConfiguredMaximum() {
+        AnalysisQueryRepository queryRepository = mock(AnalysisQueryRepository.class);
+        AnalysisResultRepository resultRepository = mock(AnalysisResultRepository.class);
+        AnalysisQueryService service = new AnalysisQueryService(properties(), queryRepository, resultRepository);
+
+        assertThatThrownBy(() -> service.getHistory("history-service", "history.Interface.query", 6))
+                .isInstanceOf(AiopsException.class)
+                .extracting("errorCode")
+                .isEqualTo(ErrorCode.VALIDATION_FAILED);
+        verifyNoInteractions(queryRepository, resultRepository);
+    }
+
     private AiopsProperties properties() {
         return new AiopsProperties(
                 new AiopsProperties.Analysis(
@@ -140,7 +153,8 @@ class AnalysisQueryServiceTests {
                         50,
                         500,
                         10,
-                        10
+                        10,
+                        5
                 ),
                 new AiopsProperties.Provider(
                         Duration.ofSeconds(10),
