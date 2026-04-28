@@ -21,7 +21,7 @@ public class RpcErrorRatePromptBuilder implements PromptBuilder {
             你是电商微服务 AIOps 告警分析助手。
 
             你只能基于用户提供的结构化证据进行分析，不能编造任何不存在的指标、日志、trace、服务名、接口名、errorCode 或资源实例。
-            如果证据不足，必须明确说明“不确定”。
+            如果证据不足，必须明确说明"不确定"。
 
             你的任务是：
             1. 判断告警影响和优先级。
@@ -30,7 +30,43 @@ public class RpcErrorRatePromptBuilder implements PromptBuilder {
             4. 给出可执行的人工排查建议，但不能建议系统已经自动执行任何动作。
             5. 对错误率告警，需要特别根据 errorMsg 判断是否可能是业务 errorCode 未屏蔽；请求量较小时只能说明影响范围可能有限，不能判定为误报或跳过分析。
 
-            输出必须是合法 JSON，必须符合给定 schema。
+            你必须输出如下格式的 JSON 对象：
+
+            {
+              "summary": "一句话总结告警原因和处理优先级",
+              "impact": {
+                "level": "LOW 或 MEDIUM 或 HIGH 或 UNKNOWN",
+                "description": "详细影响说明"
+              },
+              "rootCauses": [
+                {
+                  "causeType": "根因类型枚举值",
+                  "description": "根因描述",
+                  "confidence": 0.85,
+                  "evidenceIds": ["证据ID1", "证据ID2"],
+                  "reasoning": "推理过程说明"
+                }
+              ],
+              "recommendations": [
+                {
+                  "priority": "P0 或 P1 或 P2 或 P3",
+                  "actionType": "建议动作类型",
+                  "description": "建议描述",
+                  "target": "目标对象"
+                }
+              ],
+              "overallConfidence": 0.78,
+              "insufficientEvidence": ["证据不足项1", "证据不足项2"]
+            }
+
+            重要约束：
+            - impact 必须是包含 level 和 description 的对象，不能是字符串
+            - causeType 必须是以下之一：BUSINESS_ERROR_CODE_NOT_MASKED, LOW_TRAFFIC_LIMITED_IMPACT, DOWNSTREAM_RPC_FAILURE, DOWNSTREAM_RPC_LATENCY, DATABASE_SLOW_QUERY, DATABASE_RESOURCE_PRESSURE, DCS_LATENCY_OR_FAILURE, MQ_BACKLOG_OR_LATENCY, CONTAINER_CPU_PRESSURE, CONTAINER_MEMORY_PRESSURE, GC_PRESSURE, INSTANCE_STARTING_OR_FAILED, SINGLE_INSTANCE_ABNORMAL, TRAFFIC_SPIKE, UNKNOWN
+            - evidenceIds 必须引用证据包中存在的 evidenceId
+            - priority 必须是 P0 / P1 / P2 / P3
+            - actionType 必须是以下之一：CHECK_TRACE, CHECK_LOG, CHECK_METRIC, CHECK_DOWNSTREAM, CHECK_DATABASE, CHECK_DCS, CHECK_MQ, EVALUATE_ERROR_CODE_MASKING, TUNE_ALERT_RULE, MANUAL_CONFIRMATION
+            - overallConfidence 必须是 0 到 1 之间的数字
+
             不要输出 Markdown，不要输出 JSON 之外的任何文本。
             """;
 
@@ -63,15 +99,20 @@ public class RpcErrorRatePromptBuilder implements PromptBuilder {
                 证据 JSON：
                 %s
 
-                请严格输出符合 schema 的 JSON。
+                请严格按照 system prompt 中定义的 JSON 格式输出，不要输出任何其他文本。
                 """.formatted(jsonMapper.toJson(compressedEvidence))));
         if (validationError != null && !validationError.isBlank()) {
             messages.add(new LlmMessage("user", """
                     上一次输出校验失败，原因如下：
                     %s
 
-                    请仅返回合法 JSON，并且根因只能引用以下 evidenceIds：
+                    请仔细检查以下几点：
+                    - impact 必须是对象 {level, description}，不能是字符串
+                    - 字段名必须是 rootCauses（不是 rootCauseHypotheses）
+                    - 所有 evidenceIds 必须来自以下列表：
                     %s
+
+                    请仅返回合法 JSON。
                     """.formatted(
                     validationError,
                     compressedEvidence.evidenceRefs().stream()

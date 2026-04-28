@@ -111,3 +111,78 @@ $env:AIOPS_LLM_API_KEY = "sk-your-deepseek-api-key"
 2. `OpenAiCompatibleLlmClient` 已支持任意 OpenAI-compatible 提供者（DeepSeek、OpenAI、Moonshot 等），只需修改 `aiops.llm.base-url` 和 `aiops.llm.model`。
 3. 全量集成测试（27 个）仍依赖本地 MySQL；重启机器后需先按 `LOCAL_MYSQL.md` 启动 `127.0.0.1:3307` 实例。
 4. API Key 为空时服务可正常启动，但 LLM 路径不可用；查询接口返回的结果会标注 `analysisMode=RULE_BASED_DEGRADED` 和 `degradedReason` 说明降级原因。
+
+---
+
+## 补充记录：Prompt 调优与真实 LLM 端到端验证
+
+### 范围说明
+
+在完成 DeepSeek 接入配置后，首次运行真实 LLM 调用发现 DeepSeek 输出的 JSON 结构与系统 Schema 不完全匹配，需要调优 Prompt 以提高格式遵循率。
+
+### 问题发现
+
+首次运行 `DeepSeekLlmIntegrationTest` 时，3 个测试全部因为 LLM 输出校验失败而进入 `DEGRADED_SUCCESS`。查询 `aiops_llm_call_log` 发现两类结构问题：
+
+1. **`impact` 字段类型错误**：LLM 输出 `"impact": "影响范围有限..."`（字符串），而 Schema 要求 `{"level": "...", "description": "..."}`（对象）
+2. **字段名错误**：LLM 输出 `"rootCauseHypotheses"` 而非 `"rootCauses"`，`"priority"` 作为顶层字段而非在 `recommendations[*]` 内
+
+根因：DeepSeek 模型对自然语言描述的 JSON Schema 遵循度不如显式的 JSON 模板示例。
+
+### 修复：Prompt 增强
+
+在 `RpcErrorRatePromptBuilder` 和 `RpcLatencyPromptBuilder` 的 System Prompt 中增加：
+
+1. **显式 JSON 输出模板**：列出完整的 JSON 结构示例，标注每个字段的类型
+2. **causeType 枚举列表**：列出全部 15 个有效值
+3. **actionType 枚举列表**：列出全部 10 个有效值（CHECK_TRACE / CHECK_LOG / CHECK_METRIC 等）
+4. **priority 枚举约束**：明确 P0-P3 四个级别
+5. **关键约束强调**："impact 必须是包含 level 和 description 的对象，不能是字符串"
+
+同时优化了重试时的错误提示——在 validation error 基础上，追加当前证据包中所有有效 evidenceId 列表，并特别提醒 "impact 必须是对象"、"字段名必须是 rootCauses"。
+
+涉及文件：
+- `src/main/java/com/company/aiops/llm/prompt/RpcErrorRatePromptBuilder.java`
+- `src/main/java/com/company/aiops/llm/prompt/RpcLatencyPromptBuilder.java`
+
+### 新增 DeepSeek 端到端集成测试
+
+新增 `DeepSeekLlmIntegrationTest`，包含 3 个测试用例：
+
+| 测试 | 描述 |
+|---|---|
+| `errorRateAlertWithRealDeepSeekLlmProducesLlmAssistedResult` | 错误率告警 + Mock Provider 数据 + 真实 DeepSeek → 验证返回 `LLM_ASSISTED` |
+| `latencyAlertWithRealDeepSeekLlmProducesLlmAssistedResult` | 时延告警 + Mock Provider 数据 + 真实 DeepSeek → 验证下游慢点识别 |
+| `llmCallLogIsPersistedAfterSuccessfulDeepSeekCall` | 验证 LLM 调用日志正确写入 `aiops_llm_call_log` |
+
+测试特点：
+- 使用 `@Tag("llm")` 标记，可通过 `-Dgroups='!llm'` 排除以跳过真实 API 调用
+- 通过 `@SpringBootTest(properties)` 注入 API Key，不写入源码
+- 超时设为 60 秒（`waitForTerminalTaskLongTimeout`），应对真实 API 延迟
+- 每次测试前自动清理数据库（继承 `AbstractAiopsIntegrationTestSupport`）
+
+涉及文件：
+- `src/test/java/com/company/aiops/analysis/replay/DeepSeekLlmIntegrationTest.java`（新增）
+
+### 验证结果
+
+Prompt 调优后，3 个 DeepSeek 测试全部通过：
+
+**错误率告警：**
+- 1 次调用成功，无需重试
+- 输入 3,328 tokens，输出 749 tokens，延迟 9.5s
+- Top 根因：`BUSINESS_ERROR_CODE_NOT_MASKED` (conf=0.9)
+- 整体置信度：0.85，analysisMode：`LLM_ASSISTED`
+
+**时延告警：**
+- 1 次调用成功，无需重试
+- 输入 3,380 tokens，输出 897 tokens，延迟 11.4s
+- Top 根因：`DOWNSTREAM_RPC_LATENCY` (conf=0.85)
+- 整体置信度：0.75，analysisMode：`LLM_ASSISTED`
+
+**LLM 调用日志：**
+- `aiops_llm_call_log` 写入正常，`call_status=SUCCESS`，`provider=openai-compatible`
+
+### 实际运行模型
+
+配置的 `model: deepseek-chat`，DeepSeek 服务端自动路由到 `deepseek-v4-flash`。实际请求/响应数据见开发日志末尾的补充说明。
