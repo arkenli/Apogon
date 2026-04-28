@@ -24,7 +24,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@SpringBootTest
+@SpringBootTest(properties = "aiops.llm.provider=mock")
 class AnalysisJobStateMachineIntegrationTests {
 
     @Autowired

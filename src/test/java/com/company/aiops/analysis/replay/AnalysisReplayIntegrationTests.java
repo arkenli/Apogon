@@ -18,7 +18,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * End-to-end phase-10 replay coverage from webhook ingestion to the phase-9 query APIs.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "aiops.llm.provider=mock"
+)
 class AnalysisReplayIntegrationTests extends AbstractAiopsIntegrationTestSupport {
 
     @Test

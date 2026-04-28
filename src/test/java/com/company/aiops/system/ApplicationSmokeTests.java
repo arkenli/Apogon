@@ -29,7 +29,7 @@ class ApplicationSmokeTests extends AbstractAiopsIntegrationTestSupport {
         assertThat(aiopsProperties.analysis().dedupeWindow()).isEqualTo(Duration.ofMinutes(5));
         assertThat(aiopsProperties.analysis().historyQueryMaxLimit()).isEqualTo(5);
         assertThat(aiopsProperties.llm().enabled()).isTrue();
-        assertThat(aiopsProperties.llm().provider()).isEqualTo("mock");
+        assertThat(aiopsProperties.llm().provider()).isEqualTo("openai-compatible");
         assertThat(aiopsProperties.provider().parallelEnabled()).isTrue();
     }
 
