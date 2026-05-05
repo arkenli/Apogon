@@ -17,9 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Real-LLM end-to-end replay that exercises the full {@code openai-compatible} provider against
- * DeepSeek while keeping mock provider data for evidence collection.
+ * MiniMax while keeping mock provider data for evidence collection.
  *
- * <p>Uses {@code aiops.llm.provider=openai-compatible} with the configured DeepSeek API key at
+ * <p>Uses {@code aiops.llm.provider=openai-compatible} with the configured MiniMax API key at
  * runtime. These tests make live API calls and are tagged {@code llm} so they can be excluded from
  * routine CI runs.</p>
  */
@@ -28,10 +28,12 @@ import static org.assertj.core.api.Assertions.assertThat;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "aiops.llm.provider=openai-compatible",
+                "aiops.llm.base-url=${AIOPS_LLM_BASE_URL:https://api.minimaxi.com/v1}",
+                "aiops.llm.model=${AIOPS_LLM_MODEL:MiniMax-M2.7}",
                 "aiops.llm.api-key=${AIOPS_LLM_API_KEY:}"
         }
 )
-class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
+class MiniMaxLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
 
     /**
      * Real LLM calls may take 10–30 seconds; the deadline is set to 60 s to accommodate retries.
@@ -50,7 +52,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
     }
 
     @Test
-    void errorRateAlertWithRealDeepSeekLlmProducesLlmAssistedResult() {
+    void errorRateAlertWithRealMiniMaxLlmProducesLlmAssistedResult() {
         String alertId = nextNumericAlertId();
         String taskId = requireData(postWebhook(AlertSamples.withAlertId(AlertSamples.RATE_ALERT, alertId)))
                 .path("taskId")
@@ -58,7 +60,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
 
         AnalysisJob task = waitForTerminalTaskLongTimeout(taskId);
         assertThat(task.status())
-                .as("task should reach SUCCESS with real LLM")
+                .as("task should reach SUCCESS with real MiniMax LLM")
                 .isEqualTo(AnalysisJobStatus.SUCCESS);
 
         JsonNode data = requireData(getTask(taskId));
@@ -67,7 +69,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
 
         JsonNode result = data.path("result");
         assertThat(result.path("analysisMode").asText())
-                .as("real LLM call should produce LLM_ASSISTED")
+                .as("real MiniMax call should produce LLM_ASSISTED")
                 .isEqualTo("LLM_ASSISTED");
         assertThat(result.path("llmUsed").asBoolean())
                 .as("llmUsed must be true when LLM succeeds")
@@ -103,7 +105,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
                 .as("result should cite compressed evidence references")
                 .isNotEmpty();
 
-        System.out.println("=== DeepSeek LLM error-rate analysis result ===");
+        System.out.println("=== MiniMax LLM error-rate analysis result ===");
         System.out.println("analysisMode: " + result.path("analysisMode").asText());
         System.out.println("summary:       " + result.path("summary").asText());
         System.out.println("impact:        " + result.path("impact").path("level").asText()
@@ -123,7 +125,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
     }
 
     @Test
-    void latencyAlertWithRealDeepSeekLlmProducesLlmAssistedResult() {
+    void latencyAlertWithRealMiniMaxLlmProducesLlmAssistedResult() {
         String alertId = nextNumericAlertId();
         String taskId = requireData(postWebhook(AlertSamples.withAlertId(AlertSamples.LATENCY_ALERT, alertId)))
                 .path("taskId")
@@ -131,7 +133,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
 
         AnalysisJob task = waitForTerminalTaskLongTimeout(taskId);
         assertThat(task.status())
-                .as("task should reach SUCCESS with real LLM")
+                .as("task should reach SUCCESS with real MiniMax LLM")
                 .isEqualTo(AnalysisJobStatus.SUCCESS);
 
         JsonNode data = requireData(getTask(taskId));
@@ -150,7 +152,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
         assertThat(result.path("recommendations")).isNotEmpty();
         assertThat(result.path("overallConfidence").asDouble()).isBetween(0.0, 1.0);
 
-        System.out.println("=== DeepSeek LLM latency analysis result ===");
+        System.out.println("=== MiniMax LLM latency analysis result ===");
         System.out.println("analysisMode: " + result.path("analysisMode").asText());
         System.out.println("summary:       " + result.path("summary").asText());
         System.out.println("impact:        " + result.path("impact").path("level").asText()
@@ -170,7 +172,7 @@ class DeepSeekLlmIntegrationTest extends AbstractAiopsIntegrationTestSupport {
     }
 
     @Test
-    void llmCallLogIsPersistedAfterSuccessfulDeepSeekCall() {
+    void llmCallLogIsPersistedAfterSuccessfulMiniMaxCall() {
         String alertId = nextNumericAlertId();
         String taskId = requireData(postWebhook(AlertSamples.withAlertId(AlertSamples.RATE_ALERT, alertId)))
                 .path("taskId")

@@ -30,6 +30,8 @@ class ApplicationSmokeTests extends AbstractAiopsIntegrationTestSupport {
         assertThat(aiopsProperties.analysis().historyQueryMaxLimit()).isEqualTo(5);
         assertThat(aiopsProperties.llm().enabled()).isTrue();
         assertThat(aiopsProperties.llm().provider()).isEqualTo("openai-compatible");
+        assertThat(aiopsProperties.llm().model()).isEqualTo("MiniMax-M2.7");
+        assertThat(aiopsProperties.llm().baseUrl()).isEqualTo("https://api.minimaxi.com/v1");
         assertThat(aiopsProperties.provider().parallelEnabled()).isTrue();
     }
 

@@ -45,13 +45,13 @@ aiops:
   llm:
     enabled: true
     provider: openai-compatible
-    model: deepseek-chat
+    model: ${AIOPS_LLM_MODEL:MiniMax-M2.7}
     temperature: 0.1
     max-output-tokens: 4000
     timeout: PT45S
     fallback-enabled: true
     fallback-rule-engine-version: fallback-rules-v1
-    base-url: ${AIOPS_LLM_BASE_URL:https://api.deepseek.com}
+    base-url: ${AIOPS_LLM_BASE_URL:https://api.minimaxi.com/v1}
     api-key: ${AIOPS_LLM_API_KEY:}
 
   thresholds:
