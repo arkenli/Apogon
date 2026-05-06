@@ -6,7 +6,7 @@ import java.time.Duration;
 import java.time.Instant;
 
 /**
- * Reads the previous comparable baseline window for one interface.
+ * Reads the aggregated result of the previous comparable baseline window for one interface.
  */
 public interface BaselineProvider {
 

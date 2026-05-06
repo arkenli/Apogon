@@ -42,16 +42,9 @@ class DefaultLatencyRuleAnalyzerTests {
                 RuleAnalysisTestFixtures.latencyAlert(49, 3067L),
                 BaselineEvidence.available(new InterfaceBaseline(
                         60.0,
-                        95.0,
-                        130.0,
                         0.01,
-                        0.03,
-                        0.08,
                         220L,
-                        450L,
-                        980L,
                         480L,
-                        900L,
                         1800L,
                         List.of(),
                         false

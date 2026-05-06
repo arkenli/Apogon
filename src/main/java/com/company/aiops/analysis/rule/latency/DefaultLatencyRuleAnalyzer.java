@@ -36,6 +36,7 @@ import java.util.Set;
 @Component
 public class DefaultLatencyRuleAnalyzer implements LatencyRuleAnalyzer {
 
+    private static final double BASELINE_MULTIPLIER = 2.0;
     private static final List<String> SQL_KEYWORDS = List.of("sql", "dao", "db", "database", "jdbc", "connection");
     private static final List<String> DCS_KEYWORDS = List.of("redis", "dcs", "cache", "timeout");
 
@@ -151,7 +152,7 @@ public class DefaultLatencyRuleAnalyzer implements LatencyRuleAnalyzer {
             ruleFindings.add(new RuleFinding(
                     "TRAFFIC_SPIKE",
                     trafficSpikeCandidate.confidence(),
-                    "Current request count is significantly higher than the baseline request-count P99.",
+                    "Current request count is significantly higher than the comparable baseline request count.",
                     trafficSpikeCandidate.evidenceIds()
             ));
         }
@@ -189,32 +190,32 @@ public class DefaultLatencyRuleAnalyzer implements LatencyRuleAnalyzer {
     ) {
         long currentAvgLatency = resolveCurrentAverageLatency(alert, interfaceEntries);
         long currentP99Latency = resolveCurrentP99Latency(alert, interfaceEntries);
-        Long baselineAvgP99 = baseline == null ? null : baseline.avgLatencyP99Ms();
-        Long baselineP99 = baseline == null ? null : baseline.p99LatencyP99Ms();
+        Long baselineAvgLatency = baseline == null ? null : baseline.avgLatencyMs();
+        Long baselineP99Latency = baseline == null ? null : baseline.p99LatencyMs();
 
         String evidenceId = "latency.profile.1";
         evidenceRefs.add(new EvidenceReference(
                 evidenceId,
                 "LATENCY_PROFILE",
-                "Current average and P99 latency compared with baseline P99 levels."
+                "Current average and P99 latency compared with the comparable baseline window."
         ));
 
-        if (baselineAvgP99 != null && baselineP99 != null
-                && currentAvgLatency > baselineAvgP99
-                && currentP99Latency > baselineP99) {
+        if (baselineAvgLatency != null && baselineP99Latency != null
+                && currentAvgLatency > baselineAvgLatency * BASELINE_MULTIPLIER
+                && currentP99Latency > baselineP99Latency * BASELINE_MULTIPLIER) {
             ruleFindings.add(new RuleFinding(
                     "BROAD_LATENCY_DEGRADATION",
                     0.75,
-                    "Average latency and P99 latency both exceed the comparable baseline P99 window.",
+                    "Average latency and P99 latency both exceed the comparable baseline window by 2x.",
                     List.of(evidenceId)
             ));
             return;
         }
-        if (baselineP99 != null && currentP99Latency > baselineP99) {
+        if (baselineP99Latency != null && currentP99Latency > baselineP99Latency * BASELINE_MULTIPLIER) {
             ruleFindings.add(new RuleFinding(
                     "TAIL_LATENCY_DEGRADATION",
                     0.55,
-                    "P99 latency exceeds the baseline while average latency is not broadly elevated.",
+                    "P99 latency exceeds the comparable baseline window by 2x while average latency is not broadly elevated.",
                     List.of(evidenceId)
             ));
         }
@@ -549,14 +550,16 @@ public class DefaultLatencyRuleAnalyzer implements LatencyRuleAnalyzer {
             List<MetricAnomaly> metricAnomalies
     ) {
         Double requestCount = alert.triggerValues() == null ? null : alert.triggerValues().requestCount();
-        Double requestCountP99 = baseline == null ? null : baseline.requestCountP99();
-        if (requestCount == null || requestCountP99 == null || requestCount <= requestCountP99 * 2) {
+        Double baselineRequestCount = baseline == null ? null : baseline.requestCount();
+        if (requestCount == null
+                || baselineRequestCount == null
+                || requestCount <= baselineRequestCount * BASELINE_MULTIPLIER) {
             return candidate("TRAFFIC_SPIKE", 0, List.of(), "Request count is not above baseline spike threshold.");
         }
 
         List<String> evidenceIds = new ArrayList<>(List.of("latency.traffic.1"));
         int score = 25;
-        List<String> reasons = new ArrayList<>(List.of("request count is above baseline P99 * 2"));
+        List<String> reasons = new ArrayList<>(List.of("request count is above comparable baseline * 2"));
         boolean accompanyingPressure = !traceAnalysis.downstreamObservations().isEmpty()
                 || metricAnomalies.stream().anyMatch(anomaly ->
                 "CONTAINER".equals(anomaly.resourceType()) || "CSE".equals(anomaly.resourceType()));

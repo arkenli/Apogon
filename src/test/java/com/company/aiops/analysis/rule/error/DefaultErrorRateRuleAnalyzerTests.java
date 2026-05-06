@@ -42,16 +42,9 @@ class DefaultErrorRateRuleAnalyzerTests {
                 RuleAnalysisTestFixtures.errorRateAlert(3),
                 BaselineEvidence.available(new InterfaceBaseline(
                         100.0,
-                        120.0,
-                        150.0,
                         0.01,
-                        0.03,
-                        0.05,
                         80L,
-                        120L,
-                        180L,
                         100L,
-                        160L,
                         220L,
                         List.of(new InterfaceBaseline.ErrorCodeBaseline("E100", 20L, 0.60, List.of("activity validation failed"))),
                         true

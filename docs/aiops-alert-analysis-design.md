@@ -870,11 +870,16 @@ public interface BaselineProvider {
 
 基线内容：
 
-1. 前一天同时间段请求量平均值、P99、最大值。
-2. 前一天同时间段失败率平均值、P99、最大值。
-3. 前一天同时间段平均时延、P99 时延的平均值、P99、最大值。
+1. 前一天同时间段请求量。
+2. 前一天同时间段失败率。
+3. 前一天同时间段平均时延、P99 时延、最大时延。
 4. 常见 errorCode TopN。
 5. 历史是否发生过同类告警。
+
+说明：
+
+1. `BaselineProvider` 返回的是“前一天同时间段可比窗口”的一次聚合结果，不对同一窗口内的请求量、失败率再做平均值/P99/最大值二次统计。
+2. 时延字段直接表示该窗口内的平均时延、P99 时延和最大时延。
 
 基线窗口计算：
 
@@ -887,18 +892,11 @@ baselineWindow = [alarmWindow.start - baselineOffsetDays, alarmWindow.end - base
 
 ```java
 public record InterfaceBaseline(
-    Double requestCountAvg,
-    Double requestCountP99,
-    Double requestCountMax,
-    Double failRateAvg,
-    Double failRateP99,
-    Double failRateMax,
-    Long avgLatencyAvgMs,
-    Long avgLatencyP99Ms,
-    Long avgLatencyMaxMs,
-    Long p99LatencyAvgMs,
-    Long p99LatencyP99Ms,
-    Long p99LatencyMaxMs,
+    Double requestCount,
+    Double failRate,
+    Long avgLatencyMs,
+    Long p99LatencyMs,
+    Long maxLatencyMs,
     List<ErrorCodeBaseline> commonErrorCodes,
     boolean sameAlertOccurred
 ) {}
@@ -938,7 +936,7 @@ ResourceMapping 数据不是实时推断数据，而是预置的服务资源映�
 ### 9.1 通用规则
 
 1. 请求量规模判断：前置告警系统已经完成过滤，本系统收到告警后必须完整分析，不因请求量低跳过、忽略或判定为误报。请求量只用于判断影响范围，例如请求量较小时可以在结论中提示“暂不表现为大范围故障”。
-2. 相比基线突增：当前失败率或时延超过前一天同时间段基线 P99 的 `baselineMultiplier`，默认 2 倍。
+2. 相比基线突增：当前失败率或时延超过前一天同时间段基线值的 `baselineMultiplier`，默认 2 倍。
 3. 单实例异常：某实例 CPU、内存、GC、错误率或时延显著高于其他实例。
 4. 容器资源异常：CPU > 80%、内存 > 85%、FullGC > 0 或 YoungGC 突增。
 5. 实例状态异常：启动中或启动失败实例数量 > 0。
@@ -960,7 +958,7 @@ public interface MetricAnomalyDetector {
 异常判断优先级：
 
 1. 明确阈值，例如 CPU > 80%。
-2. 与历史基线比，例如当前值 > 前一天同时间段基线 P99 * 2。
+2. 与历史基线比，例如当前值 > 前一天同时间段基线值 * 2。
 3. 与多实例横向比，例如单实例值 > 实例中位数 * 2 且超过绝对阈值。
 4. 趋势变化，例如告警前 5 分钟斜率明显上升。
 
@@ -1077,8 +1075,8 @@ topUidShare = top uid failure count / total failure count
     "failRate": 1.0
   },
   "baseline": {
-    "requestCountP99": 120,
-    "failRateP99": 0.02,
+    "requestCount": 120,
+    "failRate": 0.02,
     "commonErrorCodes": ["BUSINESS_VALIDATE_FAILED"]
   },
   "errorDistribution": [
@@ -1244,7 +1242,7 @@ if root span latency is high but child span total latency is low:
 对比基线：
 
 ```text
-if currentRequestCount > baselineRequestCountP99 * 2:
+if currentRequestCount > baselineRequestCount * 2:
     add finding TRAFFIC_SPIKE
 ```
 
@@ -1264,9 +1262,10 @@ if currentRequestCount > baselineRequestCountP99 * 2:
     "avgLatencyMs": 3067
   },
   "baseline": {
-    "avgLatencyP99Ms": 800,
-    "p99LatencyP99Ms": 1800,
-    "requestCountP99": 60
+    "avgLatencyMs": 800,
+    "p99LatencyMs": 1800,
+    "maxLatencyMs": 2600,
+    "requestCount": 60
   },
   "latencyDistribution": {
     "avgMs": 3067,
@@ -1736,7 +1735,7 @@ score < 20  -> confidence = 0.20
 | `CONTAINER_MEMORY_PRESSURE` | 内存使用率高加 20；内存持续上升加 10；伴随 GC 异常加 15 |
 | `GC_PRESSURE` | FullGC > 0 加 35；YoungGC 突增加 15；GC 时间窗口与慢请求重合加 15 |
 | `INSTANCE_STARTING_OR_FAILED` | 启动中或启动失败实例数量 > 0 加 30；异常实例与慢请求实例重合加 20 |
-| `TRAFFIC_SPIKE` | 当前请求量 > 前一天同时间段基线 P99 * 2 加 25；同时 CPU/CSE/下游耗时升高加 20 |
+| `TRAFFIC_SPIKE` | 当前请求量 > 前一天同时间段基线请求量 * 2 加 25；同时 CPU/CSE/下游耗时升高加 20 |
 
 时延降级 summary 生成规则：
 

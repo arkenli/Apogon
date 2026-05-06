@@ -232,7 +232,7 @@ class DefaultEvidenceCompressorTests {
         );
         return new ProviderCollectionResult(
                 context,
-                BaselineEvidence.available(new InterfaceBaseline(10.0, 12.0, 15.0, 0.10, 0.20, 0.30, 100L, 120L, 150L, 200L, 220L, 260L, List.of(), false)),
+                BaselineEvidence.available(new InterfaceBaseline(10.0, 0.10, 100L, 200L, 260L, List.of(), false)),
                 InterfaceLogEvidence.available(interfaceEntries, interfaceEntries.stream().map(InterfaceLogEntry::traceId).toList()),
                 TraceEvidence.available(List.of()),
                 RuntimeLogEvidence.available(runtimeLogs),

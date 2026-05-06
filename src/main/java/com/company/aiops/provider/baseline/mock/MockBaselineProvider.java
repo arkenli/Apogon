@@ -32,32 +32,18 @@ public class MockBaselineProvider implements BaselineProvider {
         return latencyProfile
                 ? new InterfaceBaseline(
                 60.0,
-                95.0,
-                130.0,
                 0.01,
-                0.03,
-                0.08,
                 220L,
-                450L,
-                980L,
                 480L,
-                900L,
                 1800L,
                 List.of(),
                 false
         )
                 : new InterfaceBaseline(
                 120.0,
-                180.0,
-                240.0,
                 0.02,
-                0.05,
-                0.10,
                 90L,
-                180L,
-                260L,
                 150L,
-                280L,
                 420L,
                 List.of(new InterfaceBaseline.ErrorCodeBaseline(
                         "ACTIVITY_NOT_ELIGIBLE",
