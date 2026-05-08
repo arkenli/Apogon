@@ -107,9 +107,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().interfaceName(),
                                 initialContext.alert().cluster(),
-                                initialContext.alert().metricOccurTime(),
-                                aiopsProperties.analysis().baselineCompareDuration(),
-                                aiopsProperties.analysis().baselineOffsetDays()
+                                initialContext.baselineWindow()
                         )));
         CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_INTERFACE_LOG, true, () ->

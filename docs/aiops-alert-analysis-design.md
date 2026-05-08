@@ -861,9 +861,7 @@ public interface BaselineProvider {
         String serviceName,
         String interfaceName,
         String cluster,
-        Instant occurTime,
-        Duration compareDuration,
-        int baselineOffsetDays
+        TimeWindow baselineWindow
     );
 }
 ```
@@ -878,8 +876,9 @@ public interface BaselineProvider {
 
 说明：
 
-1. `BaselineProvider` 返回的是“前一天同时间段可比窗口”的一次聚合结果，不对同一窗口内的请求量、失败率再做平均值/P99/最大值二次统计。
-2. 时延字段直接表示该窗口内的平均时延、P99 时延和最大时延。
+1. `BaselineProvider` 直接接收上游已计算好的 `baselineWindow`，不再在 Provider 内重复根据 `occurTime`、`compareDuration`、`baselineOffsetDays` 推导窗口。
+2. `BaselineProvider` 返回的是“前一天同时间段可比窗口”的一次聚合结果，不对同一窗口内的请求量、失败率再做平均值/P99/最大值二次统计。
+3. 时延字段直接表示该窗口内的平均时延、P99 时延和最大时延。
 
 基线窗口计算：
 

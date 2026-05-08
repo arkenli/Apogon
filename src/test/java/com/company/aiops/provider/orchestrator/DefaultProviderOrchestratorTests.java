@@ -69,7 +69,7 @@ class DefaultProviderOrchestratorTests {
                         cluster,
                         List.of(new ResourceMappingItem("DATABASE", "db-1", "db-1", null))
                 ),
-                (serviceName, interfaceName, cluster, occurTime, compareDuration, baselineOffsetDays) -> {
+                (serviceName, interfaceName, cluster, baselineWindow) -> {
                     started.countDown();
                     await(release);
                     return InterfaceBaseline.empty();
@@ -110,7 +110,7 @@ class DefaultProviderOrchestratorTests {
                 properties(true),
                 new InMemoryProviderCallLogRepository(),
                 (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
-                (serviceName, interfaceName, cluster, occurTime, compareDuration, baselineOffsetDays) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
                 (serviceName, interfaceName, window, limit) -> List.of(
                         new InterfaceLogEntry(serviceName, interfaceName, "trace-1", "1", null, "uid-1", false, "E1", "msg", 120L, window.endTime())
                 ),
@@ -136,7 +136,7 @@ class DefaultProviderOrchestratorTests {
                 properties(true),
                 new InMemoryProviderCallLogRepository(),
                 (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
-                (serviceName, interfaceName, cluster, occurTime, compareDuration, baselineOffsetDays) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
                 (serviceName, interfaceName, window, limit) -> {
                     throw new IllegalStateException("interface log provider unavailable");
                 },

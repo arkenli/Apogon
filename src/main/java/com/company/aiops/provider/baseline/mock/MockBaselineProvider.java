@@ -1,12 +1,11 @@
 package com.company.aiops.provider.baseline.mock;
 
+import com.company.aiops.analysis.context.TimeWindow;
 import com.company.aiops.provider.baseline.BaselineProvider;
 import com.company.aiops.provider.mock.MockProviderTokens;
 import com.company.aiops.provider.model.InterfaceBaseline;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 
 /**
@@ -20,9 +19,7 @@ public class MockBaselineProvider implements BaselineProvider {
             String serviceName,
             String interfaceName,
             String cluster,
-            Instant occurTime,
-            Duration compareDuration,
-            int baselineOffsetDays
+            TimeWindow baselineWindow
     ) {
         if (serviceName != null && serviceName.contains(MockProviderTokens.FAIL_BASELINE)) {
             throw new IllegalStateException("mock baseline provider failure for service " + serviceName);
