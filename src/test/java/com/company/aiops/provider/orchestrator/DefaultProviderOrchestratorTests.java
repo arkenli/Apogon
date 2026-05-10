@@ -12,7 +12,11 @@ import com.company.aiops.persistence.repository.ProviderCallLogRepository;
 import com.company.aiops.provider.baseline.BaselineProvider;
 import com.company.aiops.provider.log.InterfaceLogProvider;
 import com.company.aiops.provider.log.RuntimeLogProvider;
-import com.company.aiops.provider.metric.MetricProvider;
+import com.company.aiops.provider.metric.ContainerMetricProvider;
+import com.company.aiops.provider.metric.CseMetricProvider;
+import com.company.aiops.provider.metric.DatabaseMetricProvider;
+import com.company.aiops.provider.metric.DcsMetricProvider;
+import com.company.aiops.provider.metric.MqMetricProvider;
 import com.company.aiops.provider.model.ContainerMetrics;
 import com.company.aiops.provider.model.CseMetrics;
 import com.company.aiops.provider.model.DatabaseMetrics;
@@ -84,7 +88,11 @@ class DefaultProviderOrchestratorTests {
                 },
                 traceId -> List.of(new InterfaceLogEntry("trace-service", "trace.if", traceId, "span", null, "uid", true, null, null, 200L, Instant.now())),
                 (traceId, serviceName, window, limit) -> List.of(new RuntimeLogEntry(serviceName, traceId, "WARN", "runtime sample", Instant.now())),
-                new StableMetricProvider()
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
         );
 
         CompletableFuture<ProviderCollectionResult> future = CompletableFuture.supplyAsync(() ->
@@ -118,7 +126,11 @@ class DefaultProviderOrchestratorTests {
                 (traceId, serviceName, window, limit) -> {
                     throw new IllegalStateException("runtime provider unavailable");
                 },
-                new StableMetricProvider()
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
         );
 
         ProviderCollectionResult result = orchestrator.collect("task-runtime-fail", context(AlertCategory.RPC_ERROR_RATE));
@@ -142,7 +154,11 @@ class DefaultProviderOrchestratorTests {
                 },
                 traceId -> List.of(),
                 (traceId, serviceName, window, limit) -> List.of(),
-                new StableMetricProvider()
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
         );
 
         ProviderCollectionResult result = orchestrator.collect("task-interface-fail", context(AlertCategory.RPC_ERROR_RATE));
@@ -166,7 +182,11 @@ class DefaultProviderOrchestratorTests {
             InterfaceLogProvider interfaceLogProvider,
             TraceProvider traceProvider,
             RuntimeLogProvider runtimeLogProvider,
-            MetricProvider metricProvider
+            ContainerMetricProvider containerMetricProvider,
+            CseMetricProvider cseMetricProvider,
+            DatabaseMetricProvider databaseMetricProvider,
+            DcsMetricProvider dcsMetricProvider,
+            MqMetricProvider mqMetricProvider
     ) {
         providerExecutor = new ThreadPoolTaskExecutor();
         providerExecutor.setCorePoolSize(8);
@@ -189,7 +209,11 @@ class DefaultProviderOrchestratorTests {
                 interfaceLogProvider,
                 traceProvider,
                 runtimeLogProvider,
-                metricProvider,
+                containerMetricProvider,
+                cseMetricProvider,
+                databaseMetricProvider,
+                dcsMetricProvider,
+                mqMetricProvider,
                 providerOrchestratorExecutor
         );
     }
@@ -291,27 +315,39 @@ class DefaultProviderOrchestratorTests {
         }
     }
 
-    private static final class StableMetricProvider implements MetricProvider {
+    private static final class StableContainerMetricProvider implements ContainerMetricProvider {
 
         @Override
         public ContainerMetrics getContainerMetrics(String serviceName, String cluster, TimeWindow window) {
             return ContainerMetrics.empty();
         }
+    }
+
+    private static final class StableDatabaseMetricProvider implements DatabaseMetricProvider {
 
         @Override
         public DatabaseMetrics getDatabaseMetrics(List<String> dbInstanceIds, TimeWindow window) {
             return DatabaseMetrics.empty();
         }
+    }
+
+    private static final class StableDcsMetricProvider implements DcsMetricProvider {
 
         @Override
         public DcsMetrics getDcsMetrics(List<String> dcsInstanceIds, TimeWindow window) {
             return DcsMetrics.empty();
         }
+    }
+
+    private static final class StableMqMetricProvider implements MqMetricProvider {
 
         @Override
         public MqMetrics getMqMetrics(List<String> mqInstanceIds, TimeWindow window) {
             return MqMetrics.empty();
         }
+    }
+
+    private static final class StableCseMetricProvider implements CseMetricProvider {
 
         @Override
         public CseMetrics getCseMetrics(String serviceName, String cluster, TimeWindow window) {

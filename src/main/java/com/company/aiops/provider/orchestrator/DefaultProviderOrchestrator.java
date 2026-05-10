@@ -14,7 +14,11 @@ import com.company.aiops.common.config.AiopsProperties;
 import com.company.aiops.provider.baseline.BaselineProvider;
 import com.company.aiops.provider.log.InterfaceLogProvider;
 import com.company.aiops.provider.log.RuntimeLogProvider;
-import com.company.aiops.provider.metric.MetricProvider;
+import com.company.aiops.provider.metric.ContainerMetricProvider;
+import com.company.aiops.provider.metric.CseMetricProvider;
+import com.company.aiops.provider.metric.DatabaseMetricProvider;
+import com.company.aiops.provider.metric.DcsMetricProvider;
+import com.company.aiops.provider.metric.MqMetricProvider;
 import com.company.aiops.provider.model.ContainerMetrics;
 import com.company.aiops.provider.model.CseMetrics;
 import com.company.aiops.provider.model.DatabaseMetrics;
@@ -68,7 +72,11 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
     private final InterfaceLogProvider interfaceLogProvider;
     private final TraceProvider traceProvider;
     private final RuntimeLogProvider runtimeLogProvider;
-    private final MetricProvider metricProvider;
+    private final ContainerMetricProvider containerMetricProvider;
+    private final CseMetricProvider cseMetricProvider;
+    private final DatabaseMetricProvider databaseMetricProvider;
+    private final DcsMetricProvider dcsMetricProvider;
+    private final MqMetricProvider mqMetricProvider;
     private final Executor providerOrchestratorExecutor;
 
     public DefaultProviderOrchestrator(
@@ -79,7 +87,11 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
             InterfaceLogProvider interfaceLogProvider,
             TraceProvider traceProvider,
             RuntimeLogProvider runtimeLogProvider,
-            MetricProvider metricProvider,
+            ContainerMetricProvider containerMetricProvider,
+            CseMetricProvider cseMetricProvider,
+            DatabaseMetricProvider databaseMetricProvider,
+            DcsMetricProvider dcsMetricProvider,
+            MqMetricProvider mqMetricProvider,
             @Qualifier("providerOrchestratorExecutor") Executor providerOrchestratorExecutor
     ) {
         this.aiopsProperties = aiopsProperties;
@@ -89,7 +101,11 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
         this.interfaceLogProvider = interfaceLogProvider;
         this.traceProvider = traceProvider;
         this.runtimeLogProvider = runtimeLogProvider;
-        this.metricProvider = metricProvider;
+        this.containerMetricProvider = containerMetricProvider;
+        this.cseMetricProvider = cseMetricProvider;
+        this.databaseMetricProvider = databaseMetricProvider;
+        this.dcsMetricProvider = dcsMetricProvider;
+        this.mqMetricProvider = mqMetricProvider;
         this.providerOrchestratorExecutor = providerOrchestratorExecutor;
     }
 
@@ -119,14 +135,14 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                         )));
         CompletableFuture<ProviderResult<ContainerMetrics>> containerMetricFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_METRIC_CONTAINER, false, () ->
-                        metricProvider.getContainerMetrics(
+                        containerMetricProvider.getContainerMetrics(
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().cluster(),
                                 initialContext.alarmWindow()
                         )));
         CompletableFuture<ProviderResult<CseMetrics>> cseMetricFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_METRIC_CSE, false, () ->
-                        metricProvider.getCseMetrics(
+                        cseMetricProvider.getCseMetrics(
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().cluster(),
                                 initialContext.alarmWindow()
@@ -148,7 +164,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                         "no DATABASE resource mapping resolved"
                 )
                         : execute(taskId, context, PROVIDER_METRIC_DATABASE, false, () ->
-                        metricProvider.getDatabaseMetrics(resourceMapping.resourceIds("DATABASE"), context.alarmWindow())));
+                        databaseMetricProvider.getDatabaseMetrics(resourceMapping.resourceIds("DATABASE"), context.alarmWindow())));
         CompletableFuture<ProviderResult<DcsMetrics>> dcsMetricFuture = schedule(() ->
                 resourceMapping.resourceIds("DCS").isEmpty()
                         ? providerCallExecutor.skipped(
@@ -159,7 +175,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                         "no DCS resource mapping resolved"
                 )
                         : execute(taskId, context, PROVIDER_METRIC_DCS, false, () ->
-                        metricProvider.getDcsMetrics(resourceMapping.resourceIds("DCS"), context.alarmWindow())));
+                        dcsMetricProvider.getDcsMetrics(resourceMapping.resourceIds("DCS"), context.alarmWindow())));
         CompletableFuture<ProviderResult<MqMetrics>> mqMetricFuture = schedule(() ->
                 resourceMapping.resourceIds("MQ").isEmpty()
                         ? providerCallExecutor.skipped(
@@ -170,7 +186,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                         "no MQ resource mapping resolved"
                 )
                         : execute(taskId, context, PROVIDER_METRIC_MQ, false, () ->
-                        metricProvider.getMqMetrics(resourceMapping.resourceIds("MQ"), context.alarmWindow())));
+                        mqMetricProvider.getMqMetrics(resourceMapping.resourceIds("MQ"), context.alarmWindow())));
 
         ProviderResult<InterfaceBaseline> baselineResult = join(baselineFuture);
         ProviderResult<List<InterfaceLogEntry>> interfaceLogResult = join(interfaceLogFuture);
