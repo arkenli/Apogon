@@ -39,10 +39,17 @@ public record ProviderQueryTargets(
     }
 
     public ProviderQueryTarget targetFor(String providerName) {
+        requireText(providerName, "providerName");
         ProviderQueryTarget target = targets.get(providerName);
         if (target != null) {
             return target;
         }
         return ProviderQueryTarget.fallback(providerName, alertServiceName, alertClusterName);
+    }
+
+    private static void requireText(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(fieldName + " must not be blank");
+        }
     }
 }

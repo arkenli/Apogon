@@ -43,7 +43,7 @@ public final class ProviderNames {
     }
 
     public static boolean isKnown(String providerName) {
-        return ALL.contains(providerName);
+        return providerName != null && ALL.contains(providerName);
     }
 
     public static Set<String> queryMappableProviderNames() {

@@ -51,8 +51,18 @@ class ProviderQueryTargetsTests {
 
     @Test
     void providerNamesRecognizesKnownProviders() {
+        assertThat(ProviderNames.isKnown(ProviderNames.RESOURCE_MAPPING)).isTrue();
         assertThat(ProviderNames.isKnown(ProviderNames.BASELINE)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.INTERFACE_LOG)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.TRACE)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.RUNTIME_LOG)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.METRIC_CONTAINER)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.METRIC_CSE)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.METRIC_DATABASE)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.METRIC_DCS)).isTrue();
+        assertThat(ProviderNames.isKnown(ProviderNames.METRIC_MQ)).isTrue();
         assertThat(ProviderNames.isKnown(ProviderNames.PROVIDER_QUERY_MAPPING)).isTrue();
+        assertThat(ProviderNames.isKnown(null)).isFalse();
         assertThat(ProviderNames.isKnown("metric.unknown")).isFalse();
         assertThat(ProviderNames.queryMappableProviderNames())
                 .containsExactlyInAnyOrder(
@@ -60,6 +70,22 @@ class ProviderQueryTargetsTests {
                         ProviderNames.METRIC_CONTAINER,
                         ProviderNames.METRIC_CSE
                 );
+    }
+
+    @Test
+    void targetForRejectsBlankProviderName() {
+        ProviderQueryTargets targets = ProviderQueryTargets.fallback(
+                "demo-service",
+                "cluster2",
+                Set.of(ProviderNames.METRIC_CONTAINER)
+        );
+
+        assertThatThrownBy(() -> targets.targetFor(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("providerName must not be blank");
+        assertThatThrownBy(() -> targets.targetFor(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("providerName must not be blank");
     }
 
     @Test
