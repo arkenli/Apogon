@@ -19,9 +19,9 @@ class DefaultProviderQueryTargetResolverTests {
     void resolveAllReturnsMappedTargetsForRequestedProviders() {
         DefaultProviderQueryTargetResolver resolver = new DefaultProviderQueryTargetResolver(
                 repository(List.of(
-                        record(ProviderNames.METRIC_CONTAINER, "cluster2_front", true),
-                        record(ProviderNames.METRIC_CSE, "cluster2_rpc", true),
-                        record(ProviderNames.RUNTIME_LOG, "cluster2_logs", true)
+                        record(ProviderNames.METRIC_CONTAINER, "demo-service-container", "cluster2_front", true),
+                        record(ProviderNames.METRIC_CSE, "demo-service", "cluster2_rpc", true),
+                        record(ProviderNames.RUNTIME_LOG, "demo-service", "cluster2_logs", true)
                 ))
         );
 
@@ -31,7 +31,9 @@ class DefaultProviderQueryTargetResolverTests {
                 Set.of(ProviderNames.METRIC_CONTAINER, ProviderNames.METRIC_CSE)
         );
 
+        assertThat(targets.targetFor(ProviderNames.METRIC_CONTAINER).serviceName()).isEqualTo("demo-service-container");
         assertThat(targets.targetFor(ProviderNames.METRIC_CONTAINER).clusterName()).isEqualTo("cluster2_front");
+        assertThat(targets.targetFor(ProviderNames.METRIC_CONTAINER).mapped()).isTrue();
         assertThat(targets.targetFor(ProviderNames.METRIC_CSE).clusterName()).isEqualTo("cluster2_rpc");
         assertThat(targets.targetFor(ProviderNames.RUNTIME_LOG).clusterName()).isEqualTo("cluster2");
     }
@@ -105,14 +107,19 @@ class DefaultProviderQueryTargetResolverTests {
         };
     }
 
-    private ProviderQueryMappingRecord record(String providerName, String queryClusterName, boolean enabled) {
+    private ProviderQueryMappingRecord record(
+            String providerName,
+            String queryServiceName,
+            String queryClusterName,
+            boolean enabled
+    ) {
         Instant now = Instant.parse("2026-06-15T00:00:00Z");
         return new ProviderQueryMappingRecord(
                 1L,
                 "demo-service",
                 "cluster2",
                 providerName,
-                "demo-service",
+                queryServiceName,
                 queryClusterName,
                 enabled,
                 null,
