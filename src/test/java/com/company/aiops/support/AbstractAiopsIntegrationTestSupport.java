@@ -78,6 +78,7 @@ public abstract class AbstractAiopsIntegrationTestSupport {
 
     @org.junit.jupiter.api.BeforeEach
     protected void cleanDatabase() {
+        jdbcTemplate.update("DELETE FROM aiops_provider_query_mapping");
         jdbcTemplate.update("DELETE FROM aiops_analysis_job_state_log");
         jdbcTemplate.update("DELETE FROM aiops_llm_call_log");
         jdbcTemplate.update("DELETE FROM aiops_provider_call_log");
