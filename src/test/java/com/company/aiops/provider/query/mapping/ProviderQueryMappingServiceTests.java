@@ -93,15 +93,47 @@ class ProviderQueryMappingServiceTests {
     }
 
     @Test
-    void createRejectsUnsupportedProviderName() {
+    void createAcceptsKnownProviderOutsideCurrentRuntimeQueryTargetSet() {
+        ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
+        ProviderQueryMappingService service = service(repository);
+        Instant createdAt = Instant.parse("2026-06-16T01:10:00Z");
+        Instant updatedAt = Instant.parse("2026-06-16T01:15:00Z");
+        when(repository.create(any())).thenAnswer(invocation -> {
+            ProviderQueryMappingRecord draft = invocation.getArgument(0);
+            return new ProviderQueryMappingRecord(
+                    12L,
+                    draft.serviceName(),
+                    draft.alertClusterName(),
+                    draft.providerName(),
+                    draft.queryServiceName(),
+                    draft.queryClusterName(),
+                    draft.enabled(),
+                    draft.metadataJson(),
+                    draft.createdBy(),
+                    draft.updatedBy(),
+                    createdAt,
+                    updatedAt
+            );
+        });
+
+        ProviderQueryMappingItemResponse response = service.create(request(ProviderNames.METRIC_DATABASE, "{\"env\":\"local\"}"));
+
+        ArgumentCaptor<ProviderQueryMappingRecord> recordCaptor = ArgumentCaptor.forClass(ProviderQueryMappingRecord.class);
+        verify(repository).create(recordCaptor.capture());
+        assertThat(recordCaptor.getValue().providerName()).isEqualTo(ProviderNames.METRIC_DATABASE);
+        assertThat(response.providerName()).isEqualTo(ProviderNames.METRIC_DATABASE);
+    }
+
+    @Test
+    void createRejectsUnknownProviderName() {
         ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
         ProviderQueryMappingService service = service(repository);
 
-        assertThatThrownBy(() -> service.create(request(ProviderNames.METRIC_DATABASE, "{\"env\":\"local\"}")))
+        assertThatThrownBy(() -> service.create(request("metric.unknown", "{\"env\":\"local\"}")))
                 .isInstanceOfSatisfying(AiopsException.class, exception -> {
                     assertThat(exception.errorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
                     assertThat(exception).hasMessage(
-                            "providerName is not supported for query mapping: " + ProviderNames.METRIC_DATABASE
+                            "providerName is not supported for query mapping: metric.unknown"
                     );
                 });
 
@@ -215,6 +247,45 @@ class ProviderQueryMappingServiceTests {
     }
 
     @Test
+    void updateTranslatesDuplicateKeyExceptionToBadRequest() {
+        ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
+        ProviderQueryMappingService service = service(repository);
+        Instant createdAt = Instant.parse("2026-06-15T10:00:00Z");
+        ProviderQueryMappingRecord existing = new ProviderQueryMappingRecord(
+                6L,
+                "seed-service",
+                "seed-cluster",
+                ProviderNames.BASELINE,
+                "seed-query-service",
+                "seed-query-cluster",
+                true,
+                null,
+                "seed-user",
+                "seed-user",
+                createdAt,
+                createdAt
+        );
+        when(repository.findById(6L)).thenReturn(Optional.of(existing));
+        when(repository.update(any())).thenThrow(new DuplicateKeyException("duplicate"));
+
+        assertThatThrownBy(() -> service.update(6L, new ProviderQueryMappingItemUpsertRequest(
+                "  ams_front  ",
+                "  cluster1  ",
+                "  metric.dcs  ",
+                "  query_ams_front  ",
+                "  query_cluster_1  ",
+                null
+        )))
+                .isInstanceOfSatisfying(AiopsException.class, exception -> {
+                    assertThat(exception.errorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(exception).hasMessage(
+                            "Provider query mapping item already exists for serviceName=ams_front, "
+                                    + "alertClusterName=cluster1, providerName=metric.dcs"
+                    );
+                });
+    }
+
+    @Test
     void deleteThrowsNotFoundWhenIdIsMissing() {
         ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
         ProviderQueryMappingService service = service(repository);
@@ -228,16 +299,40 @@ class ProviderQueryMappingServiceTests {
     }
 
     @Test
-    void listNormalizesFiltersAndProviderFilterAsIntended() {
+    void deleteCallsDeleteByIdWhenRecordExists() {
+        ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
+        ProviderQueryMappingService service = service(repository);
+        when(repository.findById(7L)).thenReturn(Optional.of(new ProviderQueryMappingRecord(
+                7L,
+                "ams_front",
+                "cluster1",
+                ProviderNames.METRIC_MQ,
+                "query_ams_front",
+                "query_cluster_1",
+                true,
+                null,
+                UPDATED_BY,
+                UPDATED_BY,
+                Instant.parse("2026-06-15T09:00:00Z"),
+                Instant.parse("2026-06-15T09:05:00Z")
+        )));
+
+        service.delete(7L);
+
+        verify(repository).deleteById(7L);
+    }
+
+    @Test
+    void listNormalizesFiltersAndKnownProviderFilterAsIntended() {
         ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
         ProviderQueryMappingService service = service(repository);
         Instant now = Instant.parse("2026-06-16T02:00:00Z");
-        when(repository.findAll("ams_front", null, ProviderNames.BASELINE)).thenReturn(List.of(
+        when(repository.findAll("ams_front", null, ProviderNames.METRIC_DATABASE)).thenReturn(List.of(
                 new ProviderQueryMappingRecord(
                         7L,
                         "ams_front",
                         "cluster1",
-                        ProviderNames.BASELINE,
+                        ProviderNames.METRIC_DATABASE,
                         "query_ams_front",
                         "query_cluster_1",
                         true,
@@ -249,12 +344,12 @@ class ProviderQueryMappingServiceTests {
                 )
         ));
 
-        List<ProviderQueryMappingItemResponse> response = service.list("  ams_front  ", "   ", "  baseline  ");
+        List<ProviderQueryMappingItemResponse> response = service.list("  ams_front  ", "   ", "  metric.database  ");
 
-        verify(repository).findAll("ams_front", null, ProviderNames.BASELINE);
+        verify(repository).findAll("ams_front", null, ProviderNames.METRIC_DATABASE);
         assertThat(response).singleElement().satisfies(item -> {
             assertThat(item.id()).isEqualTo(7L);
-            assertThat(item.providerName()).isEqualTo(ProviderNames.BASELINE);
+            assertThat(item.providerName()).isEqualTo(ProviderNames.METRIC_DATABASE);
             assertThat(item.queryServiceName()).isEqualTo("query_ams_front");
         });
     }
@@ -264,11 +359,11 @@ class ProviderQueryMappingServiceTests {
         ProviderQueryMappingRepository repository = mock(ProviderQueryMappingRepository.class);
         ProviderQueryMappingService service = service(repository);
 
-        assertThatThrownBy(() -> service.list("ams_front", "cluster1", " metric.database "))
+        assertThatThrownBy(() -> service.list("ams_front", "cluster1", " metric.unknown "))
                 .isInstanceOfSatisfying(AiopsException.class, exception -> {
                     assertThat(exception.errorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
                     assertThat(exception).hasMessage(
-                            "providerName is not supported for query mapping: " + ProviderNames.METRIC_DATABASE
+                            "providerName is not supported for query mapping: metric.unknown"
                     );
                 });
 
