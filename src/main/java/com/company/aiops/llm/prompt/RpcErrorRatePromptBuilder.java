@@ -5,6 +5,8 @@ import com.company.aiops.analysis.bundle.CompressedEvidenceBundle;
 import com.company.aiops.common.exception.ErrorCode;
 import com.company.aiops.common.json.JsonMapper;
 import com.company.aiops.llm.client.LlmMessage;
+import com.company.aiops.llm.prompt.model.ServicePromptTemplateRecord;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -12,15 +14,15 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Error-rate prompt that keeps the design-document instructions centralized and injects the bounded
- * compressed evidence JSON as the only fact source available to the model.
+ * Error-rate prompt that keeps the JSON output contract in code and allows service-level analysis
+ * instructions to come from database templates.
  */
 @Component
 public class RpcErrorRatePromptBuilder implements PromptBuilder {
 
     private static final String INTERNAL_ERROR_MESSAGE = ErrorCode.INTERNAL_ERROR.defaultMessage();
 
-    private static final String SYSTEM_PROMPT = """
+    private static final String DEFAULT_SYSTEM_INSTRUCTIONS = """
             你是电商微服务 AIOps 告警分析助手。
 
             你只能基于用户提供的结构化证据进行分析，不能编造任何不存在的指标、日志、trace、服务名、接口名、errorCode 或资源实例。
@@ -32,7 +34,22 @@ public class RpcErrorRatePromptBuilder implements PromptBuilder {
             3. 每个根因假设必须引用 evidenceIds。
             4. 给出可执行的人工排查建议，但不能建议系统已经自动执行任何动作。
             5. 对错误率告警，需要特别根据 errorMsg 判断是否可能是业务 errorCode 未屏蔽；如果同一 errorCode 的代表性 errorMsg 为“%s”等系统异常语义，且日志、trace 或其他证据里没有明确表明这是正常业务校验导致的直接证据，则应优先按需要处理的代码问题或系统故障分析。仅出现业务功能名、业务场景词或 feature 描述，不足以判定为正常业务校验。请求量较小时只能说明影响范围可能有限，不能判定为误报或跳过分析。
+            """.formatted(INTERNAL_ERROR_MESSAGE);
 
+    private static final String DEFAULT_USER_INSTRUCTIONS = """
+            请分析以下 RPC 接口错误率告警。
+
+            分析重点：
+            1. 是否为真实系统故障。
+            2. 请求量规模是否说明当前告警暂不表现为大范围故障。
+            3. 是否为业务校验 errorCode 未屏蔽，判断依据必须来自 errorMsg，而不是 errorCode 字面值。
+            4. 如果代表性 errorMsg 为“%s”等系统异常语义，只有在日志或其他证据明确表明这是正常业务校验导致时，才能判断为正常业务校验；仅出现业务功能名、业务场景词或 feature 描述不构成充分依据。
+            5. 失败是否集中在某个 errorCode、某类 errorMsg、少量 uid 或少量 trace。
+            6. 是否存在下游 RPC、数据库、DCS、MQ 或容器资源异常。
+            7. 给出人工排查建议和 errorCode 屏蔽建议，但不要执行任何动作。
+            """.formatted(INTERNAL_ERROR_MESSAGE);
+
+    private static final String FIXED_OUTPUT_CONTRACT = """
             你必须输出如下格式的 JSON 对象：
 
             {
@@ -71,12 +88,19 @@ public class RpcErrorRatePromptBuilder implements PromptBuilder {
             - overallConfidence 必须是 0 到 1 之间的数字
 
             不要输出 Markdown，不要输出 JSON 之外的任何文本。
-            """.formatted(INTERNAL_ERROR_MESSAGE);
+            """;
 
     private final JsonMapper jsonMapper;
+    private final ServicePromptTemplateResolver templateResolver;
 
     public RpcErrorRatePromptBuilder(JsonMapper jsonMapper) {
+        this(jsonMapper, ServicePromptTemplateResolver.none());
+    }
+
+    @Autowired
+    public RpcErrorRatePromptBuilder(JsonMapper jsonMapper, ServicePromptTemplateResolver templateResolver) {
         this.jsonMapper = jsonMapper;
+        this.templateResolver = templateResolver;
     }
 
     @Override
@@ -86,44 +110,58 @@ public class RpcErrorRatePromptBuilder implements PromptBuilder {
 
     @Override
     public List<LlmMessage> buildMessages(CompressedEvidenceBundle compressedEvidence, String validationError) {
+        ServicePromptTemplateRecord template = resolveTemplate(compressedEvidence);
         List<LlmMessage> messages = new ArrayList<>();
-        messages.add(new LlmMessage("system", SYSTEM_PROMPT));
-        messages.add(new LlmMessage("user", """
-                请分析以下 RPC 接口错误率告警。
+        messages.add(new LlmMessage("system", systemPrompt(template)));
+        messages.add(new LlmMessage("user", userPrompt(template, compressedEvidence)));
+        if (validationError != null && !validationError.isBlank()) {
+            messages.add(new LlmMessage("user", repairPrompt(compressedEvidence, validationError)));
+        }
+        return List.copyOf(messages);
+    }
 
-                分析重点：
-                1. 是否为真实系统故障。
-                2. 请求量规模是否说明当前告警暂不表现为大范围故障。
-                3. 是否为业务校验 errorCode 未屏蔽，判断依据必须来自 errorMsg，而不是 errorCode 字面值。
-                4. 如果代表性 errorMsg 为“%s”等系统异常语义，只有在日志或其他证据明确表明这是正常业务校验导致时，才能判断为正常业务校验；仅出现业务功能名、业务场景词或 feature 描述不构成充分依据。
-                5. 失败是否集中在某个 errorCode、某类 errorMsg、少量 uid 或少量 trace。
-                6. 是否存在下游 RPC、数据库、DCS、MQ 或容器资源异常。
-                7. 给出人工排查建议和 errorCode 屏蔽建议，但不要执行任何动作。
+    private ServicePromptTemplateRecord resolveTemplate(CompressedEvidenceBundle compressedEvidence) {
+        if (compressedEvidence == null || compressedEvidence.alert() == null) {
+            return null;
+        }
+        return templateResolver.resolve(compressedEvidence.alert().serviceName(), supportedCategory())
+                .orElse(null);
+    }
+
+    private String systemPrompt(ServicePromptTemplateRecord template) {
+        String instructions = template == null ? DEFAULT_SYSTEM_INSTRUCTIONS : template.systemPrompt();
+        return instructions.strip() + "\n\n" + FIXED_OUTPUT_CONTRACT;
+    }
+
+    private String userPrompt(ServicePromptTemplateRecord template, CompressedEvidenceBundle compressedEvidence) {
+        String instructions = template == null ? DEFAULT_USER_INSTRUCTIONS : template.userPrompt();
+        return """
+                %s
 
                 证据 JSON：
                 %s
 
                 请严格按照 system prompt 中定义的 JSON 格式输出，不要输出任何其他文本。
-                """.formatted(INTERNAL_ERROR_MESSAGE, jsonMapper.toJson(compressedEvidence))));
-        if (validationError != null && !validationError.isBlank()) {
-            messages.add(new LlmMessage("user", """
-                    上一次输出校验失败，原因如下：
-                    %s
+                """.formatted(instructions.strip(), jsonMapper.toJson(compressedEvidence));
+    }
 
-                    请仔细检查以下几点：
-                    - impact 必须是对象 {level, description}，不能是字符串
-                    - 字段名必须是 rootCauses（不是 rootCauseHypotheses）
-                    - 所有 evidenceIds 必须来自以下列表：
-                    %s
+    private String repairPrompt(CompressedEvidenceBundle compressedEvidence, String validationError) {
+        return """
+                上一次输出校验失败，原因如下：
+                %s
 
-                    请仅返回合法 JSON。
-                    """.formatted(
-                    validationError,
-                    compressedEvidence.evidenceRefs().stream()
-                            .map(reference -> reference.evidenceId() + ":" + reference.description())
-                            .collect(Collectors.joining(", "))
-            )));
-        }
-        return List.copyOf(messages);
+                请仔细检查以下几点：
+                - impact 必须是对象 {level, description}，不能是字符串
+                - 字段名必须是 rootCauses（不是 rootCauseHypotheses）
+                - 所有 evidenceIds 必须来自以下列表：
+                %s
+
+                请仅返回合法 JSON。
+                """.formatted(
+                validationError,
+                compressedEvidence.evidenceRefs().stream()
+                        .map(reference -> reference.evidenceId() + ":" + reference.description())
+                        .collect(Collectors.joining(", "))
+        );
     }
 }
