@@ -188,6 +188,11 @@ Validation:
 3. `metadataJson`, when present, must be valid JSON.
 4. Duplicate rows are rejected by the unique key and returned as a bad request.
 
+The maintenance API accepts known provider names for forward-compatible configuration, but the
+first runtime iteration only consumes provider query targets for `baseline`,
+`metric.container`, and `metric.cse`. Rows for other known providers are stored as configuration
+data and take effect only after the corresponding provider integrates query-target resolution.
+
 ## Orchestrator Data Flow
 
 At the start of `DefaultProviderOrchestrator.collect(...)`:
