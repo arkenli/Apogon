@@ -14,11 +14,13 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 @Service
 public class ProviderQueryMappingService {
 
     private static final String UPDATED_BY = "provider-query-mapping-api";
+    private static final Set<String> SUPPORTED_PROVIDER_NAMES = ProviderNames.queryMappableProviderNames();
 
     private final ProviderQueryMappingRepository providerQueryMappingRepository;
     private final ObjectMapper objectMapper;
@@ -146,14 +148,11 @@ public class ProviderQueryMappingService {
 
     private String normalizeProviderName(String value) {
         String normalized = normalizeRequired(value, "providerName");
-        if (ProviderNames.PROVIDER_QUERY_MAPPING.equals(normalized)) {
+        if (!SUPPORTED_PROVIDER_NAMES.contains(normalized)) {
             throw new AiopsException(
                     ErrorCode.BAD_REQUEST,
-                    "providerName must not be " + ProviderNames.PROVIDER_QUERY_MAPPING
+                    "providerName is not supported for query mapping: " + normalized
             );
-        }
-        if (!ProviderNames.isKnown(normalized)) {
-            throw new AiopsException(ErrorCode.BAD_REQUEST, "providerName must be a known provider");
         }
         return normalized;
     }
