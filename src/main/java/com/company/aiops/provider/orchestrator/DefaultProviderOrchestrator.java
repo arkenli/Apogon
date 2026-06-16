@@ -11,6 +11,7 @@ import com.company.aiops.analysis.evidence.TraceEvidence;
 import com.company.aiops.analysis.evidence.TraceRecord;
 import com.company.aiops.analysis.result.MissingEvidence;
 import com.company.aiops.common.config.AiopsProperties;
+import com.company.aiops.provider.ProviderNames;
 import com.company.aiops.provider.baseline.BaselineProvider;
 import com.company.aiops.provider.log.InterfaceLogProvider;
 import com.company.aiops.provider.log.RuntimeLogProvider;
@@ -30,6 +31,9 @@ import com.company.aiops.provider.model.ProviderResult;
 import com.company.aiops.provider.model.ProviderStatus;
 import com.company.aiops.provider.model.ResourceMapping;
 import com.company.aiops.provider.model.RuntimeLogEntry;
+import com.company.aiops.provider.query.ProviderQueryTarget;
+import com.company.aiops.provider.query.ProviderQueryTargetResolver;
+import com.company.aiops.provider.query.ProviderQueryTargets;
 import com.company.aiops.provider.resource.ResourceMappingProvider;
 import com.company.aiops.provider.trace.TraceProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -41,6 +45,7 @@ import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
@@ -54,19 +59,22 @@ import java.util.stream.Collectors;
 @Service
 public class DefaultProviderOrchestrator implements ProviderOrchestrator {
 
-    private static final String PROVIDER_RESOURCE_MAPPING = "resourceMapping";
-    private static final String PROVIDER_BASELINE = "baseline";
-    private static final String PROVIDER_INTERFACE_LOG = "interfaceLog";
-    private static final String PROVIDER_TRACE = "trace";
-    private static final String PROVIDER_RUNTIME_LOG = "runtimeLog";
-    private static final String PROVIDER_METRIC_CONTAINER = "metric.container";
-    private static final String PROVIDER_METRIC_CSE = "metric.cse";
-    private static final String PROVIDER_METRIC_DATABASE = "metric.database";
-    private static final String PROVIDER_METRIC_DCS = "metric.dcs";
-    private static final String PROVIDER_METRIC_MQ = "metric.mq";
+    private static final String PROVIDER_RESOURCE_MAPPING = ProviderNames.RESOURCE_MAPPING;
+    private static final String PROVIDER_BASELINE = ProviderNames.BASELINE;
+    private static final String PROVIDER_INTERFACE_LOG = ProviderNames.INTERFACE_LOG;
+    private static final String PROVIDER_TRACE = ProviderNames.TRACE;
+    private static final String PROVIDER_RUNTIME_LOG = ProviderNames.RUNTIME_LOG;
+    private static final String PROVIDER_METRIC_CONTAINER = ProviderNames.METRIC_CONTAINER;
+    private static final String PROVIDER_METRIC_CSE = ProviderNames.METRIC_CSE;
+    private static final String PROVIDER_METRIC_DATABASE = ProviderNames.METRIC_DATABASE;
+    private static final String PROVIDER_METRIC_DCS = ProviderNames.METRIC_DCS;
+    private static final String PROVIDER_METRIC_MQ = ProviderNames.METRIC_MQ;
+    private static final String PROVIDER_QUERY_MAPPING = ProviderNames.PROVIDER_QUERY_MAPPING;
+    private static final Set<String> QUERY_TARGET_PROVIDER_NAMES = ProviderNames.queryMappableProviderNames();
 
     private final AiopsProperties aiopsProperties;
     private final ProviderCallExecutor providerCallExecutor;
+    private final ProviderQueryTargetResolver providerQueryTargetResolver;
     private final ResourceMappingProvider resourceMappingProvider;
     private final BaselineProvider baselineProvider;
     private final InterfaceLogProvider interfaceLogProvider;
@@ -82,6 +90,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
     public DefaultProviderOrchestrator(
             AiopsProperties aiopsProperties,
             ProviderCallExecutor providerCallExecutor,
+            ProviderQueryTargetResolver providerQueryTargetResolver,
             ResourceMappingProvider resourceMappingProvider,
             BaselineProvider baselineProvider,
             InterfaceLogProvider interfaceLogProvider,
@@ -96,6 +105,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
     ) {
         this.aiopsProperties = aiopsProperties;
         this.providerCallExecutor = providerCallExecutor;
+        this.providerQueryTargetResolver = providerQueryTargetResolver;
         this.resourceMappingProvider = resourceMappingProvider;
         this.baselineProvider = baselineProvider;
         this.interfaceLogProvider = interfaceLogProvider;
@@ -117,12 +127,34 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().cluster()
                         )));
+        ProviderResult<ProviderQueryTargets> providerQueryTargetsResult = execute(
+                taskId,
+                initialContext,
+                PROVIDER_QUERY_MAPPING,
+                false,
+                () -> providerQueryTargetResolver.resolveAll(
+                        initialContext.alert().serviceName(),
+                        initialContext.alert().cluster(),
+                        QUERY_TARGET_PROVIDER_NAMES
+                )
+        );
+        ProviderQueryTargets providerQueryTargets = providerQueryTargetsResult.isUsable()
+                && providerQueryTargetsResult.data() != null
+                ? providerQueryTargetsResult.data()
+                : ProviderQueryTargets.fallback(
+                        initialContext.alert().serviceName(),
+                        initialContext.alert().cluster(),
+                        QUERY_TARGET_PROVIDER_NAMES
+                );
+        ProviderQueryTarget baselineTarget = providerQueryTargets.targetFor(PROVIDER_BASELINE);
+        ProviderQueryTarget containerTarget = providerQueryTargets.targetFor(PROVIDER_METRIC_CONTAINER);
+        ProviderQueryTarget cseTarget = providerQueryTargets.targetFor(PROVIDER_METRIC_CSE);
         CompletableFuture<ProviderResult<InterfaceBaseline>> baselineFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_BASELINE, false, () ->
                         baselineProvider.getInterfaceBaseline(
-                                initialContext.alert().serviceName(),
+                                baselineTarget.serviceName(),
                                 initialContext.alert().interfaceName(),
-                                initialContext.alert().cluster(),
+                                baselineTarget.clusterName(),
                                 initialContext.baselineWindow()
                         )));
         CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() ->
@@ -136,15 +168,15 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
         CompletableFuture<ProviderResult<ContainerMetrics>> containerMetricFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_METRIC_CONTAINER, false, () ->
                         containerMetricProvider.getContainerMetrics(
-                                initialContext.alert().serviceName(),
-                                initialContext.alert().cluster(),
+                                containerTarget.serviceName(),
+                                containerTarget.clusterName(),
                                 initialContext.alarmWindow()
                         )));
         CompletableFuture<ProviderResult<CseMetrics>> cseMetricFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_METRIC_CSE, false, () ->
                         cseMetricProvider.getCseMetrics(
-                                initialContext.alert().serviceName(),
-                                initialContext.alert().cluster(),
+                                cseTarget.serviceName(),
+                                cseTarget.clusterName(),
                                 initialContext.alarmWindow()
                         )));
 
@@ -217,6 +249,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                 : metricAggregateResult.data();
 
         List<ProviderResult<?>> providerResults = List.of(
+                providerQueryTargetsResult,
                 resourceMappingResult,
                 baselineResult,
                 interfaceLogResult,
@@ -236,6 +269,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                 && traceResult.isFailure();
         boolean nonCriticalFailure = providerResults.stream()
                 .filter(result -> !Objects.equals(result.providerName(), PROVIDER_INTERFACE_LOG))
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_QUERY_MAPPING))
                 .anyMatch(this::hasMissingEvidence);
         boolean fallbackRequired = interfaceLogUnavailable
                 || latencyTraceUnavailable
@@ -551,6 +585,8 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                     "WARN/ERROR runtime log samples are unavailable for this alert window.";
             case PROVIDER_BASELINE ->
                     "Historical comparison for the same time window is unavailable.";
+            case PROVIDER_QUERY_MAPPING ->
+                    "Provider-specific query target mapping is unavailable; provider calls used alert service and cluster values.";
             case PROVIDER_RESOURCE_MAPPING ->
                     "DB/DCS/MQ metric lookups may be incomplete because resource mapping is unavailable.";
             case PROVIDER_METRIC_CONTAINER ->

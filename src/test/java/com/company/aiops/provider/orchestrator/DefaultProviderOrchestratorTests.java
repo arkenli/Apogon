@@ -9,6 +9,7 @@ import com.company.aiops.analysis.context.TimeWindow;
 import com.company.aiops.analysis.evidence.ProviderCollectionResult;
 import com.company.aiops.common.config.AiopsProperties;
 import com.company.aiops.persistence.repository.ProviderCallLogRepository;
+import com.company.aiops.provider.ProviderNames;
 import com.company.aiops.provider.baseline.BaselineProvider;
 import com.company.aiops.provider.log.InterfaceLogProvider;
 import com.company.aiops.provider.log.RuntimeLogProvider;
@@ -29,6 +30,9 @@ import com.company.aiops.provider.model.ProviderStatus;
 import com.company.aiops.provider.model.ResourceMapping;
 import com.company.aiops.provider.model.ResourceMappingItem;
 import com.company.aiops.provider.model.RuntimeLogEntry;
+import com.company.aiops.provider.query.ProviderQueryTarget;
+import com.company.aiops.provider.query.ProviderQueryTargetResolver;
+import com.company.aiops.provider.query.ProviderQueryTargets;
 import com.company.aiops.provider.resource.ResourceMappingProvider;
 import com.company.aiops.provider.trace.TraceProvider;
 import org.junit.jupiter.api.AfterEach;
@@ -38,6 +42,8 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -68,6 +74,7 @@ class DefaultProviderOrchestratorTests {
         DefaultProviderOrchestrator orchestrator = orchestrator(
                 properties(true),
                 callLogRepository,
+                fallbackResolver(),
                 (serviceName, cluster) -> new ResourceMapping(
                         serviceName,
                         cluster,
@@ -117,6 +124,7 @@ class DefaultProviderOrchestratorTests {
         DefaultProviderOrchestrator orchestrator = orchestrator(
                 properties(true),
                 new InMemoryProviderCallLogRepository(),
+                fallbackResolver(),
                 (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
                 (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
                 (serviceName, interfaceName, window, limit) -> List.of(
@@ -147,6 +155,7 @@ class DefaultProviderOrchestratorTests {
         DefaultProviderOrchestrator orchestrator = orchestrator(
                 properties(true),
                 new InMemoryProviderCallLogRepository(),
+                fallbackResolver(),
                 (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
                 (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
                 (serviceName, interfaceName, window, limit) -> {
@@ -174,9 +183,108 @@ class DefaultProviderOrchestratorTests {
                 .contains(true);
     }
 
+    @Test
+    void collectUsesProviderSpecificQueryTargetsForServiceLevelProviders() {
+        CapturingResourceMappingProvider resourceMappingProvider = new CapturingResourceMappingProvider();
+        CapturingBaselineProvider baselineProvider = new CapturingBaselineProvider();
+        CapturingContainerMetricProvider containerMetricProvider = new CapturingContainerMetricProvider();
+        CapturingCseMetricProvider cseMetricProvider = new CapturingCseMetricProvider();
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                new InMemoryProviderCallLogRepository(),
+                (serviceName, cluster, providerNames) -> new ProviderQueryTargets(
+                        serviceName,
+                        cluster,
+                        Map.of(
+                                ProviderNames.BASELINE,
+                                ProviderQueryTarget.mapped(
+                                        ProviderNames.BASELINE,
+                                        "demo-service-baseline",
+                                        "cluster2_base"
+                                ),
+                                ProviderNames.METRIC_CONTAINER,
+                                ProviderQueryTarget.mapped(
+                                        ProviderNames.METRIC_CONTAINER,
+                                        "demo-service-container",
+                                        "cluster2_front"
+                                ),
+                                ProviderNames.METRIC_CSE,
+                                ProviderQueryTarget.mapped(
+                                        ProviderNames.METRIC_CSE,
+                                        "demo-service-cse",
+                                        "cluster2_rpc"
+                                )
+                        )
+                ),
+                resourceMappingProvider,
+                baselineProvider,
+                (serviceName, interfaceName, window, limit) -> List.of(),
+                traceId -> List.of(),
+                (traceId, serviceName, window, limit) -> List.of(),
+                containerMetricProvider,
+                cseMetricProvider,
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect("task-query-targets", context(AlertCategory.RPC_ERROR_RATE));
+
+        assertThat(result.ruleFallbackRequired()).isFalse();
+        assertThat(baselineProvider.serviceName).isEqualTo("demo-service-baseline");
+        assertThat(baselineProvider.clusterName).isEqualTo("cluster2_base");
+        assertThat(containerMetricProvider.serviceName).isEqualTo("demo-service-container");
+        assertThat(containerMetricProvider.clusterName).isEqualTo("cluster2_front");
+        assertThat(cseMetricProvider.serviceName).isEqualTo("demo-service-cse");
+        assertThat(cseMetricProvider.clusterName).isEqualTo("cluster2_rpc");
+        assertThat(resourceMappingProvider.serviceName).isEqualTo("demo-service");
+        assertThat(resourceMappingProvider.clusterName).isEqualTo("cluster1");
+    }
+
+    @Test
+    void collectContinuesWithAlertClusterWhenQueryMappingResolutionFails() {
+        InMemoryProviderCallLogRepository callLogRepository = new InMemoryProviderCallLogRepository();
+        CapturingContainerMetricProvider containerMetricProvider = new CapturingContainerMetricProvider();
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                callLogRepository,
+                (serviceName, cluster, providerNames) -> {
+                    throw new IllegalStateException("mapping table unavailable");
+                },
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> List.of(
+                        new InterfaceLogEntry(serviceName, interfaceName, "trace-1", "1", null, "uid-1", false, "E1", "msg", 120L, window.endTime())
+                ),
+                traceId -> List.of(),
+                (traceId, serviceName, window, limit) -> List.of(),
+                containerMetricProvider,
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect("task-query-targets-fail", context(AlertCategory.RPC_ERROR_RATE));
+
+        assertThat(result.ruleFallbackRequired()).isFalse();
+        assertThat(result.degradedByProviderFailure()).isTrue();
+        assertThat(containerMetricProvider.clusterName).isEqualTo("cluster1");
+        assertThat(result.missingEvidence())
+                .extracting("providerName")
+                .contains(ProviderNames.PROVIDER_QUERY_MAPPING);
+        assertThat(callLogRepository.logs)
+                .extracting(ProviderCallLog::providerName)
+                .contains(ProviderNames.PROVIDER_QUERY_MAPPING, ProviderNames.METRIC_CONTAINER);
+        assertThat(result.providerResults())
+                .extracting("providerName")
+                .containsSubsequence(ProviderNames.PROVIDER_QUERY_MAPPING, ProviderNames.RESOURCE_MAPPING);
+    }
+
     private DefaultProviderOrchestrator orchestrator(
             AiopsProperties properties,
             ProviderCallLogRepository providerCallLogRepository,
+            ProviderQueryTargetResolver providerQueryTargetResolver,
             ResourceMappingProvider resourceMappingProvider,
             BaselineProvider baselineProvider,
             InterfaceLogProvider interfaceLogProvider,
@@ -204,6 +312,7 @@ class DefaultProviderOrchestratorTests {
         return new DefaultProviderOrchestrator(
                 properties,
                 providerCallExecutor,
+                providerQueryTargetResolver,
                 resourceMappingProvider,
                 baselineProvider,
                 interfaceLogProvider,
@@ -291,6 +400,14 @@ class DefaultProviderOrchestratorTests {
         );
     }
 
+    private ProviderQueryTargetResolver fallbackResolver() {
+        return (serviceName, cluster, providerNames) -> ProviderQueryTargets.fallback(
+                serviceName,
+                cluster,
+                providerNames == null ? Set.of() : providerNames
+        );
+    }
+
     private void await(CountDownLatch latch) {
         try {
             latch.await(1, TimeUnit.SECONDS);
@@ -351,6 +468,63 @@ class DefaultProviderOrchestratorTests {
 
         @Override
         public CseMetrics getCseMetrics(String serviceName, String cluster, TimeWindow window) {
+            return CseMetrics.empty();
+        }
+    }
+
+    private static final class CapturingResourceMappingProvider implements ResourceMappingProvider {
+
+        private String serviceName;
+        private String clusterName;
+
+        @Override
+        public ResourceMapping queryResourceMapping(String serviceName, String cluster) {
+            this.serviceName = serviceName;
+            this.clusterName = cluster;
+            return ResourceMapping.empty(serviceName, cluster);
+        }
+    }
+
+    private static final class CapturingBaselineProvider implements BaselineProvider {
+
+        private String serviceName;
+        private String clusterName;
+
+        @Override
+        public InterfaceBaseline getInterfaceBaseline(
+                String serviceName,
+                String interfaceName,
+                String cluster,
+                TimeWindow baselineWindow
+        ) {
+            this.serviceName = serviceName;
+            this.clusterName = cluster;
+            return InterfaceBaseline.empty();
+        }
+    }
+
+    private static final class CapturingContainerMetricProvider implements ContainerMetricProvider {
+
+        private String serviceName;
+        private String clusterName;
+
+        @Override
+        public ContainerMetrics getContainerMetrics(String serviceName, String cluster, TimeWindow window) {
+            this.serviceName = serviceName;
+            this.clusterName = cluster;
+            return ContainerMetrics.empty();
+        }
+    }
+
+    private static final class CapturingCseMetricProvider implements CseMetricProvider {
+
+        private String serviceName;
+        private String clusterName;
+
+        @Override
+        public CseMetrics getCseMetrics(String serviceName, String cluster, TimeWindow window) {
+            this.serviceName = serviceName;
+            this.clusterName = cluster;
             return CseMetrics.empty();
         }
     }
