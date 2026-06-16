@@ -281,6 +281,118 @@ class DefaultProviderOrchestratorTests {
                 .containsSubsequence(ProviderNames.PROVIDER_QUERY_MAPPING, ProviderNames.RESOURCE_MAPPING);
     }
 
+    @Test
+    void collectStartsInterfaceLogEvenWhenQueryMappingResolutionIsBlocked() throws Exception {
+        CountDownLatch queryMappingStarted = new CountDownLatch(1);
+        CountDownLatch releaseQueryMapping = new CountDownLatch(1);
+        CountDownLatch interfaceLogStarted = new CountDownLatch(1);
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                new InMemoryProviderCallLogRepository(),
+                (serviceName, cluster, providerNames) -> {
+                    queryMappingStarted.countDown();
+                    await(releaseQueryMapping);
+                    return ProviderQueryTargets.fallback(serviceName, cluster, providerNames);
+                },
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> {
+                    interfaceLogStarted.countDown();
+                    return List.of();
+                },
+                traceId -> List.of(),
+                (traceId, serviceName, window, limit) -> List.of(),
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        CompletableFuture<ProviderCollectionResult> future = CompletableFuture.supplyAsync(() ->
+                orchestrator.collect("task-query-mapping-blocked", context(AlertCategory.RPC_ERROR_RATE))
+        );
+
+        assertThat(queryMappingStarted.await(1, TimeUnit.SECONDS)).isTrue();
+        boolean interfaceLogObserved;
+        try {
+            interfaceLogObserved = interfaceLogStarted.await(300, TimeUnit.MILLISECONDS);
+        } finally {
+            releaseQueryMapping.countDown();
+        }
+
+        ProviderCollectionResult result = future.get(2, TimeUnit.SECONDS);
+
+        assertThat(interfaceLogObserved).isTrue();
+        assertThat(result.ruleFallbackRequired()).isFalse();
+    }
+
+    @Test
+    void collectIgnoresQueryMappingFailureForFallbackWhenContinueOnNonCriticalFailureIsFalse() {
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true, false),
+                new InMemoryProviderCallLogRepository(),
+                (serviceName, cluster, providerNames) -> {
+                    throw new IllegalStateException("mapping table unavailable");
+                },
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> List.of(),
+                traceId -> List.of(),
+                (traceId, serviceName, window, limit) -> List.of(),
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect(
+                "task-query-mapping-no-fallback",
+                context(AlertCategory.RPC_ERROR_RATE)
+        );
+
+        assertThat(result.ruleFallbackRequired()).isFalse();
+        assertThat(result.degradedByProviderFailure()).isTrue();
+        assertThat(result.missingEvidence())
+                .extracting("providerName")
+                .containsExactly(ProviderNames.PROVIDER_QUERY_MAPPING);
+    }
+
+    @Test
+    void collectPrioritizesOperationalMissingEvidenceAheadOfQueryMappingFailure() {
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                new InMemoryProviderCallLogRepository(),
+                (serviceName, cluster, providerNames) -> {
+                    throw new IllegalStateException("mapping table unavailable");
+                },
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> List.of(
+                        new InterfaceLogEntry(serviceName, interfaceName, "trace-1", "1", null, "uid-1", false, "E1", "msg", 120L, window.endTime())
+                ),
+                traceId -> List.of(new InterfaceLogEntry("trace-service", "trace.if", traceId, "span", null, "uid", true, null, null, 200L, Instant.now())),
+                (traceId, serviceName, window, limit) -> {
+                    throw new IllegalStateException("runtime provider unavailable");
+                },
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect(
+                "task-query-mapping-priority",
+                context(AlertCategory.RPC_ERROR_RATE)
+        );
+
+        assertThat(result.missingEvidence())
+                .extracting("providerName")
+                .containsExactly(ProviderNames.RUNTIME_LOG, ProviderNames.PROVIDER_QUERY_MAPPING);
+    }
+
     private DefaultProviderOrchestrator orchestrator(
             AiopsProperties properties,
             ProviderCallLogRepository providerCallLogRepository,
@@ -358,6 +470,10 @@ class DefaultProviderOrchestratorTests {
     }
 
     private AiopsProperties properties(boolean parallelEnabled) {
+        return properties(parallelEnabled, true);
+    }
+
+    private AiopsProperties properties(boolean parallelEnabled, boolean continueOnNonCriticalFailure) {
         return new AiopsProperties(
                 new AiopsProperties.Analysis(
                         Duration.ofMinutes(5),
@@ -382,7 +498,7 @@ class DefaultProviderOrchestratorTests {
                         0,
                         Duration.ofMillis(10),
                         parallelEnabled,
-                        true
+                        continueOnNonCriticalFailure
                 ),
                 new AiopsProperties.Llm(
                         false,

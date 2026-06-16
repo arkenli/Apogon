@@ -127,6 +127,14 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().cluster()
                         )));
+        CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() ->
+                execute(taskId, initialContext, PROVIDER_INTERFACE_LOG, true, () ->
+                        interfaceLogProvider.queryByInterface(
+                                initialContext.alert().serviceName(),
+                                initialContext.alert().interfaceName(),
+                                initialContext.alarmWindow(),
+                                initialContext.options().maxInterfaceLogLimit()
+                        )));
         ProviderResult<ProviderQueryTargets> providerQueryTargetsResult = execute(
                 taskId,
                 initialContext,
@@ -156,14 +164,6 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                                 initialContext.alert().interfaceName(),
                                 baselineTarget.clusterName(),
                                 initialContext.baselineWindow()
-                        )));
-        CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() ->
-                execute(taskId, initialContext, PROVIDER_INTERFACE_LOG, true, () ->
-                        interfaceLogProvider.queryByInterface(
-                                initialContext.alert().serviceName(),
-                                initialContext.alert().interfaceName(),
-                                initialContext.alarmWindow(),
-                                initialContext.options().maxInterfaceLogLimit()
                         )));
         CompletableFuture<ProviderResult<ContainerMetrics>> containerMetricFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_METRIC_CONTAINER, false, () ->
@@ -546,17 +546,24 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
             List<ProviderResult<?>> providerResults
     ) {
         List<MissingEvidence> missingEvidence = new ArrayList<>();
+        List<MissingEvidence> deferredMissingEvidence = new ArrayList<>();
         for (ProviderResult<?> result : providerResults) {
             if (!hasMissingEvidence(result)) {
                 continue;
             }
-            missingEvidence.add(new MissingEvidence(
+            MissingEvidence evidence = new MissingEvidence(
                     result.providerName(),
                     defaultIfBlank(result.errorMessage(), "provider evidence unavailable"),
                     isCriticalProvider(result.providerName(), category),
                     impactFor(result.providerName(), category)
-            ));
+            );
+            if (PROVIDER_QUERY_MAPPING.equals(result.providerName())) {
+                deferredMissingEvidence.add(evidence);
+                continue;
+            }
+            missingEvidence.add(evidence);
         }
+        missingEvidence.addAll(deferredMissingEvidence);
         return missingEvidence;
     }
 
