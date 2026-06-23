@@ -63,7 +63,15 @@ public record CompressedEvidenceBundle(
             String avgLatencyEvidenceId,
             Long avgLatencyMs,
             String p99LatencyEvidenceId,
-            Long p99LatencyMs
+            Long p99LatencyMs,
+            String failureCountEvidenceId,
+            Double failureCount,
+            String logLevelEvidenceId,
+            String logLevel,
+            String logMessageEvidenceId,
+            String logMessage,
+            String normalizedLogQueryEvidenceId,
+            String normalizedLogQuery
     ) {
     }
 
@@ -140,12 +148,30 @@ public record CompressedEvidenceBundle(
     public record RuntimeLogSnapshot(
             boolean collected,
             String missingReason,
-            List<RuntimeLogSample> samples
+            List<RuntimeLogSample> samples,
+            boolean messageQueryMatched,
+            String matchedLogQuery,
+            List<RuntimeLogQueryAttempt> queryAttempts,
+            List<String> sampledTraceIds
     ) {
 
         public RuntimeLogSnapshot {
             samples = samples == null ? List.of() : List.copyOf(samples);
+            queryAttempts = queryAttempts == null ? List.of() : List.copyOf(queryAttempts);
+            sampledTraceIds = sampledTraceIds == null ? List.of() : List.copyOf(sampledTraceIds);
         }
+    }
+
+    /**
+     * One runtime-log message query attempted while collecting service-error-log evidence.
+     */
+    public record RuntimeLogQueryAttempt(
+            String evidenceId,
+            String query,
+            String level,
+            int hitCount,
+            boolean selected
+    ) {
     }
 
     /**

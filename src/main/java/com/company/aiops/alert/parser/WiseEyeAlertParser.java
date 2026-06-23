@@ -18,9 +18,6 @@ import java.time.format.DateTimeParseException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * WiseEye 文本告警解析器，实现设计文档中约定的字段提取顺序。
- */
 @Component
 public class WiseEyeAlertParser implements AlertParser {
 
@@ -50,16 +47,25 @@ public class WiseEyeAlertParser implements AlertParser {
                 extractSingleLineValue(rawText, "Severity"),
                 firstNonBlank(hostFields.serviceName(), extractByPatterns(rawText,
                         "serviceName='([^']+)'",
-                        "服务名称[：:]?\\s*([^,，\\n]+)")),
+                        "服务名称[：:]?\\s*([^,，\\n]+)",
+                        "鏈嶅姟鍚嶇О[锛?]?\\s*([^,锛孿\\n]+)")),
                 firstNonBlank(hostFields.interfaceName(), extractByPatterns(rawText,
                         "interfaceName='([^']+)'",
                         "接口名称为([^,，\\n]+)",
-                        "接口[：:]\\s*([^,，\\n]+)")),
-                firstNonBlank(hostFields.cluster(), extractByPatterns(rawText, "集群[：:]\\s*([^,，\\n]+)")),
+                        "接口[：:]\\s*([^,，\\n]+)",
+                        "鎺ュ彛鍚嶇О涓?([^,锛孿\\n]+)",
+                        "鎺ュ彛[锛?]\\s*([^,锛孿\\n]+)")),
+                firstNonBlank(hostFields.cluster(), extractByPatterns(rawText,
+                        "集群信息[：:]\\s*([^,，\\n]+)",
+                        "集群[：:]\\s*([^,，\\n]+)",
+                        "闆嗙兢[锛?]\\s*([^,锛孿\\n]+)")),
                 extractLastSingleLineValue(rawText, "Site"),
                 extractSingleLineValue(rawText, "Tenant"),
                 extractSingleLineValue(rawText, "Application"),
-                extractByPatterns(rawText, "AlertName:\\s*([^,\\n]+)", "告警名称[：:]\\s*([^\\n\\r]+)"),
+                extractByPatterns(rawText,
+                        "AlertName:\\s*([^,\\n]+)",
+                        "告警名称[：:]\\s*([^\\n\\r]+)",
+                        "鍛婅鍚嶇О[锛?]\\s*([^\\n\\r]+)"),
                 extractByPatterns(rawText, "MetricName:\\s*([^,\\n]+)"),
                 extractSingleLineValue(rawText, "Category"),
                 rawText,
@@ -84,9 +90,9 @@ public class WiseEyeAlertParser implements AlertParser {
         try {
             JsonNode hostJson = objectMapper.readTree(hostLine.substring(jsonStart, jsonEnd + 1));
             return new HostFields(
-                    jsonText(hostJson, "servicename", "serviceName", "服务名称"),
-                    jsonText(hostJson, "interfacename", "interfaceName", "接口", "接口名称"),
-                    jsonText(hostJson, "cluster", "clusterName", "集群")
+                    jsonText(hostJson, "servicename", "serviceName", "服务名称", "鏈嶅姟鍚嶇О"),
+                    jsonText(hostJson, "interfacename", "interfaceName", "接口", "接口名称", "鎺ュ彛", "鎺ュ彛鍚嶇О"),
+                    jsonText(hostJson, "cluster", "clusterName", "集群", "闆嗙兢")
             );
         } catch (Exception exception) {
             throw new AiopsException(ErrorCode.BAD_REQUEST, "Host 字段 JSON 解析失败");
@@ -94,22 +100,44 @@ public class WiseEyeAlertParser implements AlertParser {
     }
 
     private AlertTriggerValues parseTriggerValues(String rawText) {
-        String failRateText = extractByPatterns(rawText, "失败率\\s*[=：]\\s*([0-9]+(?:\\.[0-9]+)?\\s*%?)");
+        String failRateText = extractByPatterns(rawText,
+                "失败率\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?\\s*%?)",
+                "澶辫触鐜.?\\s*=\\s*([0-9]+(?:\\.[0-9]+)?\\s*%?)");
+        String logMessage = extractByPatterns(rawText,
+                "日志\\s*[=：:]\\s*([^\\n\\r]*?)(?=\\s*[,，]\\s*(?:发生时间|告警发生时间|失败数|请求总数|失败率|平均时延|P99|p99|最大时延)\\s*[=：:]|\\s*(?:\\r?\\n|$))",
+                "log\\s*[=：:]\\s*([^\\n\\r]*?)(?=\\s*[,，]\\s*(?:occurTime|failureCount|requestCount|failRate)\\s*[=：:]|\\s*(?:\\r?\\n|$))");
+
         return new AlertTriggerValues(
-                parseDouble(extractByPatterns(rawText, "请求总数\\s*[=：]\\s*([0-9]+(?:\\.[0-9]+)?)")),
+                parseDouble(extractByPatterns(rawText,
+                        "请求总数\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)",
+                        "璇锋眰鎬绘暟\\s*=\\s*([0-9]+(?:\\.[0-9]+)?)")),
                 parseRate(failRateText),
-                parseLong(extractByPatterns(rawText, "平均时延\\s*[=：]\\s*([0-9]+)")),
-                parseLong(extractByPatterns(rawText, "(?:P99|p99|99线)\\s*[=：]\\s*([0-9]+)")),
-                parseLong(extractByPatterns(rawText, "(?:最大时延|maxLatency|max)\\s*[=：]\\s*([0-9]+)")),
+                parseLong(extractByPatterns(rawText,
+                        "平均时延\\s*[=：:]\\s*([0-9]+)",
+                        "骞冲潎鏃跺欢\\s*=\\s*([0-9]+)")),
+                parseLong(extractByPatterns(rawText,
+                        "(?:P99|p99|99线)\\s*[=：:]\\s*([0-9]+)",
+                        "(?:P99|p99|99绾?)\\s*=\\s*([0-9]+)")),
+                parseLong(extractByPatterns(rawText,
+                        "(?:最大时延|maxLatency|max)\\s*[=：:]\\s*([0-9]+)",
+                        "(?:鏈€澶ф椂寤|maxLatency|max)\\s*=\\s*([0-9]+)")),
+                parseDouble(extractByPatterns(rawText,
+                        "失败数\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)",
+                        "failureCount\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)")),
+                logMessage == null ? null : "ERROR",
+                logMessage,
+                normalizeLogQuery(logMessage),
                 null,
-                extractByPatterns(rawText, "告警信息[：:]\\s*([^\\n\\r]+)")
+                extractByPatterns(rawText,
+                        "告警信息[：:]\\s*([^\\n\\r]+)",
+                        "鍛婅淇℃伅[锛?]\\s*([^\\n\\r]+)")
         );
     }
 
     private Instant parseMetricOccurTime(String rawText) {
-        // 设计文档要求优先采用 Details 中的发生时间，其次再回退到 Occur Time。
         String detailsTime = extractByPatterns(rawText,
-                "(?:发生时间|告警发生时间)\\s*[=：]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
+                "(?:发生时间|告警发生时间)\\s*[=：:]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
+                "(?:鍙戠敓鏃堕棿|鍛婅鍙戠敓鏃堕棿)\\s*=\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
                 "occurTime='([^']+)'");
         Instant parsedDetailsTime = parseInstant(detailsTime);
         if (parsedDetailsTime != null) {
@@ -137,7 +165,8 @@ public class WiseEyeAlertParser implements AlertParser {
 
     private String extractByPatterns(String rawText, String... patterns) {
         for (String pattern : patterns) {
-            Matcher matcher = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(rawText);
+            Matcher matcher = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE | Pattern.DOTALL)
+                    .matcher(rawText);
             if (matcher.find()) {
                 return blankToNull(matcher.group(1));
             }
@@ -191,6 +220,14 @@ public class WiseEyeAlertParser implements AlertParser {
             return parsed / 100.0;
         }
         return parsed;
+    }
+
+    private String normalizeLogQuery(String logMessage) {
+        if (logMessage == null) {
+            return null;
+        }
+        String withoutDefault = logMessage.replaceFirst("(?i)^\\s*DEFAULT\\b\\s*", "");
+        return blankToNull(withoutDefault.replaceAll("\\s+", " "));
     }
 
     private String firstNonBlank(String first, String second) {

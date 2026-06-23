@@ -199,6 +199,7 @@ public record AnalysisTaskQueryResponse(
         return switch (value) {
             case RPC_ERROR_RATE -> "RPC错误率";
             case RPC_LATENCY -> "RPC时延";
+            case SERVICE_ERROR_LOG -> "服务错误日志";
             case UNKNOWN -> "未知类型";
         };
     }

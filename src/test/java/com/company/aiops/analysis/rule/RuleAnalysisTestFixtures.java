@@ -45,6 +45,10 @@ public final class RuleAnalysisTestFixtures {
                         500,
                         10,
                         10,
+                        5,
+                        8,
+                        2,
+                        "ERROR",
                         5
                 ),
                 new AiopsProperties.Provider(
@@ -89,7 +93,7 @@ public final class RuleAnalysisTestFixtures {
                 "raw alert",
                 occurTime,
                 occurTime,
-                new AlertTriggerValues(requestCount, 1.0, null, null, null, "failRate > 0.7", "raw")
+                new AlertTriggerValues(requestCount, 1.0, null, null, null, null, null, null, null, "failRate > 0.7", "raw")
         );
     }
 
@@ -112,7 +116,42 @@ public final class RuleAnalysisTestFixtures {
                 "raw alert",
                 occurTime,
                 occurTime,
-                new AlertTriggerValues(requestCount, null, avgLatencyMs, null, null, "avgLatency > 3000", "raw")
+                new AlertTriggerValues(requestCount, null, avgLatencyMs, null, null, null, null, null, null, "avgLatency > 3000", "raw")
+        );
+    }
+
+    public static AlertEvent serviceErrorLogAlert() {
+        Instant occurTime = Instant.parse("2026-04-22T03:15:00Z");
+        return new AlertEvent(
+                "alert-service-error-log",
+                AlertCategory.SERVICE_ERROR_LOG,
+                "OPEN",
+                "MAJOR",
+                "ams_front",
+                null,
+                "cluster2",
+                "cn_product_default",
+                "tenant",
+                "application",
+                "service error log alert",
+                "service_error_log",
+                "AIOps@serviceLog",
+                "raw alert",
+                occurTime,
+                occurTime,
+                new AlertTriggerValues(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        2.0,
+                        "ERROR",
+                        "DEFAULT prebook loginAppointment failed",
+                        "prebook loginAppointment failed",
+                        "failureCount > 1",
+                        "raw"
+                )
         );
     }
 
@@ -129,7 +168,7 @@ public final class RuleAnalysisTestFixtures {
                 new TimeWindow(alert.metricOccurTime().minus(Duration.ofMinutes(10)), alert.metricOccurTime().plus(Duration.ofMinutes(2))),
                 new TimeWindow(alert.metricOccurTime().minus(Duration.ofDays(1)).minus(Duration.ofMinutes(5)), alert.metricOccurTime().minus(Duration.ofDays(1)).plus(Duration.ofMinutes(5))),
                 ResourceMapping.empty(alert.serviceName(), alert.cluster()),
-                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, false, true)
+                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, 5, 8, 2, "ERROR", false, true)
         );
         return new ProviderCollectionResult(
                 context,

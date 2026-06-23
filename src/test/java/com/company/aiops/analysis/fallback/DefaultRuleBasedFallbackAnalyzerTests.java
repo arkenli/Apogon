@@ -159,6 +159,95 @@ class DefaultRuleBasedFallbackAnalyzerTests {
         assertThat(result.insufficientEvidence()).anyMatch(item -> item.contains("SKIPPED_BY_PROVIDER_FAILURE"));
     }
 
+    @Test
+    void analyzeBuildsServiceErrorLogFallbackFromRuntimeLogRuleEvidence() {
+        AlertEvent alert = RuleAnalysisTestFixtures.serviceErrorLogAlert();
+        ProviderCollectionResult collection = completeServiceLogCollection(alert);
+        RuleAnalysisEvidence ruleAnalysis = new RuleAnalysisEvidence(
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(new RuleFinding(
+                        "CURRENT_SERVICE_RUNTIME_EXCEPTION",
+                        0.68,
+                        "matched ERROR runtime log",
+                        List.of("runtime.log.1")
+                )),
+                List.of(new CandidateRootCause(
+                        "CURRENT_SERVICE_RUNTIME_EXCEPTION",
+                        68,
+                        0.68,
+                        List.of("runtime.log.1", "runtime.query.attempt.1"),
+                        "matched current service error log"
+                )),
+                List.of(
+                        new EvidenceReference("runtime.log.1", "RUNTIME_LOG", "matched runtime log"),
+                        new EvidenceReference("runtime.query.attempt.1", "RUNTIME_LOG_QUERY", "selected query")
+                ),
+                List.of()
+        );
+
+        var result = analyzer.analyze(new RuleBasedAnalysisRequest(
+                "task-service-log",
+                collection,
+                ruleAnalysis,
+                null,
+                AnalysisMode.RULE_BASED_ONLY,
+                "DISABLED",
+                null
+        ));
+
+        assertThat(result.summary()).contains("service error log");
+        assertThat(result.impact().description()).contains("failureCount");
+        assertThat(result.rootCauses()).singleElement()
+                .satisfies(rootCause -> assertThat(rootCause.causeType())
+                        .isEqualTo("CURRENT_SERVICE_RUNTIME_EXCEPTION"));
+        assertThat(result.recommendations()).extracting("actionType")
+                .contains("CHECK_LOG", "CHECK_TRACE");
+    }
+
+    @Test
+    void analyzeBuildsDegradedServiceLogResultWhenRuntimeLogLookupMisses() {
+        AlertEvent alert = RuleAnalysisTestFixtures.serviceErrorLogAlert();
+        ProviderCollectionResult collection = new ProviderCollectionResult(
+                context(alert),
+                BaselineEvidence.available(InterfaceBaseline.empty()),
+                InterfaceLogEvidence.missing("service error log alert has no interfaceName"),
+                TraceEvidence.missing("runtime log trace ids unavailable"),
+                RuntimeLogEvidence.missing("No ERROR runtime logs matched alert message queries"),
+                MetricEvidence.available(ContainerMetrics.empty(), CseMetrics.empty(),
+                        DatabaseMetrics.empty(), DcsMetrics.empty(), MqMetrics.empty(), null),
+                List.of(new MissingEvidence(
+                        "runtimeLog",
+                        "No ERROR runtime logs matched alert message queries",
+                        true,
+                        "Cannot locate the ERROR runtime log context that triggered this service-level alert."
+                )),
+                true,
+                true,
+                "Could not locate ERROR runtime log context from alert message queries.",
+                List.of()
+        );
+
+        var result = analyzer.analyze(new RuleBasedAnalysisRequest(
+                "task-service-log-miss",
+                collection,
+                null,
+                null,
+                AnalysisMode.RULE_BASED_DEGRADED,
+                "SKIPPED_BY_PROVIDER_FAILURE",
+                collection.degradedReason()
+        ));
+
+        assertThat(result.degraded()).isTrue();
+        assertThat(result.rootCauses()).singleElement()
+                .satisfies(rootCause -> assertThat(rootCause.causeType()).isEqualTo("UNKNOWN"));
+        assertThat(result.summary()).contains("could not locate ERROR runtime log context");
+        assertThat(result.recommendations()).extracting("actionType").contains("CHECK_LOG");
+    }
+
     private ProviderCollectionResult completeCollection(AlertEvent alert) {
         return new ProviderCollectionResult(
                 context(alert),
@@ -182,13 +271,47 @@ class DefaultRuleBasedFallbackAnalyzerTests {
         );
     }
 
+    private ProviderCollectionResult completeServiceLogCollection(AlertEvent alert) {
+        return new ProviderCollectionResult(
+                context(alert),
+                BaselineEvidence.available(InterfaceBaseline.empty()),
+                InterfaceLogEvidence.missing("service error log alert has no interfaceName"),
+                TraceEvidence.available(List.of()),
+                RuntimeLogEvidence.availableMessageQuery(
+                        List.of(),
+                        "loginAppointment failed",
+                        List.of(new RuntimeLogEvidence.QueryAttempt(
+                                "runtime.query.attempt.1",
+                                "loginAppointment failed",
+                                "ERROR",
+                                1,
+                                true
+                        )),
+                        List.of("trace-log-1")
+                ),
+                MetricEvidence.available(
+                        ContainerMetrics.empty(),
+                        CseMetrics.empty(),
+                        DatabaseMetrics.empty(),
+                        DcsMetrics.empty(),
+                        MqMetrics.empty(),
+                        null
+                ),
+                List.of(),
+                false,
+                false,
+                null,
+                List.of()
+        );
+    }
+
     private AnalysisContext context(AlertEvent alert) {
         return new AnalysisContext(
                 alert,
                 new TimeWindow(alert.metricOccurTime().minus(Duration.ofMinutes(10)), alert.metricOccurTime().plus(Duration.ofMinutes(2))),
                 new TimeWindow(alert.metricOccurTime().minus(Duration.ofDays(1)).minus(Duration.ofMinutes(5)), alert.metricOccurTime().minus(Duration.ofDays(1)).plus(Duration.ofMinutes(5))),
                 ResourceMapping.empty(alert.serviceName(), alert.cluster()),
-                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, false, true)
+                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, 5, 8, 2, "ERROR", false, true)
         );
     }
 
@@ -211,7 +334,15 @@ class DefaultRuleBasedFallbackAnalyzerTests {
                         "alert.avg.latency",
                         alert.triggerValues().avgLatencyMs(),
                         "alert.p99.latency",
-                        alert.triggerValues().p99LatencyMs()
+                        alert.triggerValues().p99LatencyMs(),
+                        "alert.failure.count",
+                        null,
+                        "alert.log.level",
+                        null,
+                        "alert.log.message",
+                        null,
+                        "alert.log.normalized_query",
+                        null
                 ),
                 new CompressedEvidenceBundle.BaselineSnapshot(
                         true,
@@ -240,7 +371,7 @@ class DefaultRuleBasedFallbackAnalyzerTests {
                         List.of()
                 ),
                 new CompressedEvidenceBundle.TraceSnapshot(true, null, List.of("trace-1"), List.of(), List.of()),
-                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of()),
+                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of(), false, null, List.of(), List.of()),
                 new CompressedEvidenceBundle.MetricSnapshot(
                         true,
                         null,

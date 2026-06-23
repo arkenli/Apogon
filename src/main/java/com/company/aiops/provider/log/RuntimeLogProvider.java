@@ -16,4 +16,13 @@ public interface RuntimeLogProvider {
             TimeWindow window,
             int limit
     );
+
+    List<RuntimeLogEntry> queryByMessage(
+            String serviceName,
+            String cluster,
+            String level,
+            String messageQuery,
+            TimeWindow window,
+            int limit
+    );
 }

@@ -18,9 +18,11 @@ import com.company.aiops.common.json.JsonMapper;
 import com.company.aiops.llm.client.LlmClient;
 import com.company.aiops.llm.client.LlmRequest;
 import com.company.aiops.llm.client.LlmResponse;
+import com.company.aiops.llm.client.mock.MockLlmClient;
 import com.company.aiops.llm.prompt.PromptBuilder;
 import com.company.aiops.llm.prompt.RpcErrorRatePromptBuilder;
 import com.company.aiops.llm.prompt.RpcLatencyPromptBuilder;
+import com.company.aiops.llm.prompt.ServiceErrorLogPromptBuilder;
 import com.company.aiops.llm.validator.DefaultLlmOutputValidator;
 import com.company.aiops.persistence.repository.LlmCallLogRepository;
 import com.company.aiops.provider.model.ContainerMetrics;
@@ -82,7 +84,8 @@ class DefaultLlmAnalysisServiceTests {
         ));
         List<PromptBuilder> promptBuilders = List.of(
                 new RpcErrorRatePromptBuilder(jsonMapper),
-                new RpcLatencyPromptBuilder(jsonMapper)
+                new RpcLatencyPromptBuilder(jsonMapper),
+                new ServiceErrorLogPromptBuilder(jsonMapper)
         );
         DefaultLlmAnalysisService service = new DefaultLlmAnalysisService(
                 properties(),
@@ -102,6 +105,39 @@ class DefaultLlmAnalysisServiceTests {
         assertThat(llmCallLogRepository.logs)
                 .extracting(log -> log.callStatus().name())
                 .containsExactly("INVALID_JSON", "SUCCESS");
+    }
+
+    @Test
+    void analyzeSupportsServiceErrorLogPromptBuilder() {
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        JsonMapper jsonMapper = new JsonMapper(objectMapper);
+        InMemoryLlmCallLogRepository llmCallLogRepository = new InMemoryLlmCallLogRepository();
+        LlmClient llmClient = new MockLlmClient(objectMapper);
+        DefaultLlmAnalysisService service = new DefaultLlmAnalysisService(
+                properties(),
+                jsonMapper,
+                Map.of("mock", llmClient),
+                List.of(
+                        new RpcErrorRatePromptBuilder(jsonMapper),
+                        new RpcLatencyPromptBuilder(jsonMapper),
+                        new ServiceErrorLogPromptBuilder(jsonMapper)
+                ),
+                new DefaultLlmOutputValidator(objectMapper),
+                llmCallLogRepository
+        );
+
+        var result = service.analyze(
+                "task-service-log",
+                serviceLogCollection(),
+                serviceLogCompressedEvidence()
+        );
+
+        assertThat(result.category()).isEqualTo(AlertCategory.SERVICE_ERROR_LOG);
+        assertThat(result.analysisMode()).isEqualTo(AnalysisMode.LLM_ASSISTED);
+        assertThat(result.rootCauses()).singleElement()
+                .satisfies(rootCause -> assertThat(rootCause.causeType())
+                        .isEqualTo("CURRENT_SERVICE_RUNTIME_EXCEPTION"));
+        assertThat(llmCallLogRepository.logs).hasSize(1);
     }
 
     private AiopsProperties properties() {
@@ -143,7 +179,7 @@ class DefaultLlmAnalysisServiceTests {
                 "raw",
                 occurTime,
                 occurTime,
-                new AlertTriggerValues(6.0, 0.8, null, null, null, "demo", "raw")
+                new AlertTriggerValues(6.0, 0.8, null, null, null, null, null, null, null, "demo", "raw")
         );
         return new ProviderCollectionResult(
                 RuleAnalysisTestFixtures.collection(
@@ -197,16 +233,107 @@ class DefaultLlmAnalysisServiceTests {
                         "alert.avg.latency",
                         null,
                         "alert.p99.latency",
+                        null,
+                        "alert.failure.count",
+                        null,
+                        "alert.log.level",
+                        null,
+                        "alert.log.message",
+                        null,
+                        "alert.log.normalized_query",
                         null
                 ),
                 new CompressedEvidenceBundle.BaselineSnapshot(true, null, "baseline.request.count", "baseline.fail.rate", "baseline.avg.latency", "baseline.p99.latency", InterfaceBaseline.empty()),
                 new CompressedEvidenceBundle.InterfaceLogSnapshot(true, null, "interface.request.count", 6, "interface.failure.rate", 5, 0.8, "interface.latency.profile", 0L, 0L, 0L, 0L, List.of(), List.of(), List.of()),
                 new CompressedEvidenceBundle.TraceSnapshot(true, null, List.of(), List.of(), List.of()),
-                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of()),
+                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of(), false, null, List.of(), List.of()),
                 new CompressedEvidenceBundle.MetricSnapshot(true, null, ContainerMetrics.empty(), CseMetrics.empty(), DatabaseMetrics.empty(), DcsMetrics.empty(), MqMetrics.empty(), List.of()),
                 ResourceMapping.empty("demo-service", "cluster1"),
                 new CompressedEvidenceBundle.RuleSnapshot(List.of(), List.of()),
                 List.of(new EvidenceReference("alert.request.count", "ALERT", "request count")),
+                List.of(),
+                List.of()
+        );
+    }
+
+    private ProviderCollectionResult serviceLogCollection() {
+        AlertEvent alert = RuleAnalysisTestFixtures.serviceErrorLogAlert();
+        return RuleAnalysisTestFixtures.collection(
+                alert,
+                BaselineEvidence.available(InterfaceBaseline.empty()),
+                InterfaceLogEvidence.missing("service error log alert has no interfaceName"),
+                TraceEvidence.available(List.of()),
+                RuntimeLogEvidence.availableMessageQuery(
+                        List.of(),
+                        "loginAppointment failed",
+                        List.of(new RuntimeLogEvidence.QueryAttempt(
+                                "runtime.query.attempt.1",
+                                "loginAppointment failed",
+                                "ERROR",
+                                1,
+                                true
+                        )),
+                        List.of("trace-log-1")
+                ),
+                MetricEvidence.available(
+                        ContainerMetrics.empty(),
+                        CseMetrics.empty(),
+                        DatabaseMetrics.empty(),
+                        DcsMetrics.empty(),
+                        MqMetrics.empty(),
+                        null
+                )
+        );
+    }
+
+    private CompressedEvidenceBundle serviceLogCompressedEvidence() {
+        AlertEvent alert = RuleAnalysisTestFixtures.serviceErrorLogAlert();
+        return new CompressedEvidenceBundle(
+                new CompressedEvidenceBundle.AlertSnapshot(
+                        AlertCategory.SERVICE_ERROR_LOG,
+                        alert.serviceName(),
+                        alert.interfaceName(),
+                        alert.cluster(),
+                        alert.metricOccurTime(),
+                        "alert.request.count",
+                        null,
+                        "alert.fail.rate",
+                        null,
+                        "alert.avg.latency",
+                        null,
+                        "alert.p99.latency",
+                        null,
+                        "alert.failure.count",
+                        alert.triggerValues().failureCount(),
+                        "alert.log.level",
+                        alert.triggerValues().logLevel(),
+                        "alert.log.message",
+                        alert.triggerValues().logMessage(),
+                        "alert.log.normalized_query",
+                        alert.triggerValues().normalizedLogQuery()
+                ),
+                new CompressedEvidenceBundle.BaselineSnapshot(true, null, "baseline.request.count", "baseline.fail.rate", "baseline.avg.latency", "baseline.p99.latency", InterfaceBaseline.empty()),
+                new CompressedEvidenceBundle.InterfaceLogSnapshot(false, "service error log alert has no interfaceName", "interface.request.count", 0, "interface.failure.rate", 0, 0.0, "interface.latency.profile", 0L, 0L, 0L, 0L, List.of(), List.of(), List.of()),
+                new CompressedEvidenceBundle.TraceSnapshot(true, null, List.of("trace-log-1"), List.of(), List.of()),
+                new CompressedEvidenceBundle.RuntimeLogSnapshot(
+                        true,
+                        null,
+                        List.of(),
+                        true,
+                        "loginAppointment failed",
+                        List.of(new CompressedEvidenceBundle.RuntimeLogQueryAttempt(
+                                "runtime.query.attempt.1",
+                                "loginAppointment failed",
+                                "ERROR",
+                                1,
+                                true
+                        )),
+                        List.of("trace-log-1")
+                ),
+                new CompressedEvidenceBundle.MetricSnapshot(true, null, ContainerMetrics.empty(), CseMetrics.empty(), DatabaseMetrics.empty(), DcsMetrics.empty(), MqMetrics.empty(), List.of()),
+                ResourceMapping.empty(alert.serviceName(), alert.cluster()),
+                new CompressedEvidenceBundle.RuleSnapshot(List.of(), List.of()),
+                List.of(new EvidenceReference("runtime.query.attempt.1", "RUNTIME_LOG_QUERY", "matched query")),
                 List.of(),
                 List.of()
         );

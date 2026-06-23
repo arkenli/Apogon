@@ -37,6 +37,10 @@ public class DefaultAnalysisContextFactory implements AnalysisContextFactory {
                 aiopsProperties.analysis().runtimeLogMessageMaxChars(),
                 aiopsProperties.analysis().maxErrorCodeSize(),
                 aiopsProperties.analysis().maxUidSize(),
+                aiopsProperties.analysis().errorLogMessageQueryMaxAttempts(),
+                aiopsProperties.analysis().errorLogMessageQueryMinChars(),
+                aiopsProperties.analysis().errorLogMessageQueryMinTokens(),
+                aiopsProperties.analysis().errorLogQueryLevel(),
                 aiopsProperties.llm().enabled(),
                 aiopsProperties.provider().parallelEnabled()
         );
@@ -51,7 +55,7 @@ public class DefaultAnalysisContextFactory implements AnalysisContextFactory {
 
     private TimeWindow buildAlarmWindow(AlertEvent alertEvent) {
         Duration lookback = switch (alertEvent.category()) {
-            case RPC_ERROR_RATE -> ERROR_RATE_LOOKBACK;
+            case RPC_ERROR_RATE, SERVICE_ERROR_LOG -> ERROR_RATE_LOOKBACK;
             case RPC_LATENCY -> LATENCY_LOOKBACK;
             case UNKNOWN -> ERROR_RATE_LOOKBACK;
         };

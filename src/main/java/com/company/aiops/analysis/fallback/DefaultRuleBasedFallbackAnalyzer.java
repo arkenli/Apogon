@@ -1,6 +1,7 @@
 package com.company.aiops.analysis.fallback;
 
 import com.company.aiops.alert.model.AlertEvent;
+import com.company.aiops.alert.model.AlertCategory;
 import com.company.aiops.alert.model.AlertTriggerValues;
 import com.company.aiops.analysis.bundle.CompressedEvidenceBundle;
 import com.company.aiops.analysis.evidence.ProviderCollectionResult;
@@ -296,6 +297,22 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
         }
 
         List<String> fallbackEvidenceIds = fallbackEvidenceIds(evidenceRefs);
+        if (request.collection().context().alert().category() == AlertCategory.SERVICE_ERROR_LOG
+                && request.collection().ruleFallbackRequired()) {
+            return List.of(new RootCauseHypothesis(
+                    "UNKNOWN",
+                    "Could not locate ERROR runtime log context from the alert message queries.",
+                    0.20,
+                    fallbackEvidenceIds,
+                    "RULE_ENGINE",
+                    defaultIfBlank(
+                            request.degradedReason(),
+                            request.collection().degradedReason() != null
+                                    ? request.collection().degradedReason()
+                                    : firstLine(insufficientEvidence)
+                    )
+            ));
+        }
         if (request.collection().ruleFallbackRequired()) {
             return List.of(new RootCauseHypothesis(
                     "INSUFFICIENT_CRITICAL_EVIDENCE",
@@ -365,6 +382,9 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
             case "INSTANCE_STARTING_OR_FAILED" -> "An instance-state anomaly suggests part of the service is starting slowly or failing.";
             case "LOW_TRAFFIC_LIMITED_IMPACT" -> "The current request volume is below the limited-impact threshold, so the blast radius may still be small.";
             case "TRAFFIC_SPIKE" -> "Current traffic is materially above baseline and may be amplifying the observed latency.";
+            case "CURRENT_SERVICE_RUNTIME_EXCEPTION" -> "Matched ERROR runtime logs and trace evidence point to a current-service runtime exception.";
+            case "REPEATED_BUSINESS_LOG_ERROR" -> "The service error log looks like a repeated business action failure that may need alert-rule tuning.";
+            case "UNKNOWN" -> "Rule analysis could not identify a confident root cause from the available service error-log evidence.";
             default -> "Rule analysis identified %s as a plausible cause based on the collected evidence."
                     .formatted(humanizeCauseType(candidate.causeType()));
         };
@@ -434,6 +454,7 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
         return switch (alert.category()) {
             case RPC_ERROR_RATE -> errorRateImpact(alert, request.compressedEvidence(), rootCauses, degraded, degradedReason);
             case RPC_LATENCY -> latencyImpact(alert, request.compressedEvidence(), degraded, degradedReason);
+            case SERVICE_ERROR_LOG -> serviceErrorLogImpact(alert, request.compressedEvidence(), degraded, degradedReason);
             case UNKNOWN -> new ImpactAssessment(
                     "UNKNOWN",
                     degraded
@@ -470,6 +491,24 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
         if (lowTraffic) {
             description += " The current blast radius may still be limited because request volume is low.";
         }
+        if (degraded && degradedReason != null && !degradedReason.isBlank()) {
+            description += " " + degradedReason;
+        }
+        return new ImpactAssessment(level, description);
+    }
+
+    private ImpactAssessment serviceErrorLogImpact(
+            AlertEvent alert,
+            CompressedEvidenceBundle compressedEvidence,
+            boolean degraded,
+            String degradedReason
+    ) {
+        Double failureCount = resolveFailureCount(alert, compressedEvidence);
+        String level = failureCount != null && failureCount <= 3.0 ? "LOW" : "MEDIUM";
+        String description = failureCount != null && failureCount <= 3.0
+                ? "failureCount=%s, so the current impact scope may be limited; still confirm the matched ERROR log traceId and instance distribution."
+                .formatted(formatNumber(failureCount))
+                : "Service ERROR runtime logs triggered the alert; confirm matched log count, traceId, and instance distribution.";
         if (degraded && degradedReason != null && !degradedReason.isBlank()) {
             description += " " + degradedReason;
         }
@@ -527,6 +566,19 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
                     recommendation.actionType() + "|" + recommendation.target(),
                     recommendation
             );
+            if (alert.category() == AlertCategory.SERVICE_ERROR_LOG
+                    && "CURRENT_SERVICE_RUNTIME_EXCEPTION".equals(rootCause.causeType())) {
+                Recommendation traceRecommendation = new Recommendation(
+                        "P1",
+                        "CHECK_TRACE",
+                        "Inspect the traceId extracted from the matched ERROR runtime log and identify the first failed span.",
+                        firstEvidenceId(rootCause, alert.serviceName())
+                );
+                recommendations.putIfAbsent(
+                        traceRecommendation.actionType() + "|" + traceRecommendation.target(),
+                        traceRecommendation
+                );
+            }
         }
 
         if (recommendations.isEmpty()) {
@@ -548,6 +600,32 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
             RootCauseHypothesis rootCause,
             ImpactAssessment impact
     ) {
+        if (alert.category() == AlertCategory.SERVICE_ERROR_LOG) {
+            if ("CURRENT_SERVICE_RUNTIME_EXCEPTION".equals(rootCause.causeType())) {
+                return new Recommendation(
+                        "P1",
+                        "CHECK_LOG",
+                        "Inspect the matchedLogQuery ERROR runtime log context, exceptionType, and stackTop.",
+                        firstEvidenceId(rootCause, alert.serviceName())
+                );
+            }
+            if ("REPEATED_BUSINESS_LOG_ERROR".equals(rootCause.causeType())) {
+                return new Recommendation(
+                        "P2",
+                        "CHECK_LOG",
+                        "Confirm whether the repeated business action failure is expected and whether the alert rule needs tuning.",
+                        firstEvidenceId(rootCause, alert.serviceName())
+                );
+            }
+            if ("UNKNOWN".equals(rootCause.causeType())) {
+                return new Recommendation(
+                        "P1",
+                        "CHECK_LOG",
+                        "Manually search runtime logs with normalizedLogQuery and cut matchedLogQuery values at ERROR level.",
+                        alert.serviceName()
+                );
+            }
+        }
         return switch (rootCause.causeType()) {
             case "BUSINESS_ERROR_CODE_NOT_MASKED" -> {
                 String target = ruleAnalysis.errorCodeDistribution().stream()
@@ -626,6 +704,9 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
             ImpactAssessment impact,
             String degradedReason
     ) {
+        if (alert.category() == AlertCategory.SERVICE_ERROR_LOG) {
+            return serviceErrorLogSummary(request, rootCauses, impact, degradedReason);
+        }
         RootCauseHypothesis topRootCause = rootCauses.get(0);
         String modePrefix = switch (request.analysisMode()) {
             case RULE_BASED_ONLY -> "LLM is disabled, so this result is generated only from deterministic rule evidence.";
@@ -650,6 +731,38 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
                 && degradedReason != null
                 && !degradedReason.isBlank()
                 && !summary.contains(degradedReason)) {
+            summary += " " + degradedReason;
+        }
+        return summary;
+    }
+
+    private String serviceErrorLogSummary(
+            RuleBasedAnalysisRequest request,
+            List<RootCauseHypothesis> rootCauses,
+            ImpactAssessment impact,
+            String degradedReason
+    ) {
+        RootCauseHypothesis topRootCause = rootCauses.get(0);
+        String summary;
+        if (request.analysisMode() == AnalysisMode.RULE_BASED_DEGRADED
+                || request.collection().ruleFallbackRequired()) {
+            summary = "Rule-based degraded service error log analysis could not locate ERROR runtime log context from alert msg.";
+        } else {
+            summary = switch (topRootCause.causeType()) {
+                case "CURRENT_SERVICE_RUNTIME_EXCEPTION" ->
+                        "Rule-based service error log analysis matched ERROR runtime log context and points to a current-service runtime exception.";
+                case "DOWNSTREAM_RPC_FAILURE" ->
+                        "Rule-based service error log analysis matched ERROR runtime log context and trace evidence points to downstream failure.";
+                case "REPEATED_BUSINESS_LOG_ERROR" ->
+                        "Rule-based service error log analysis indicates a repeated business log error or expected business failure pattern.";
+                default ->
+                        "Rule-based service error log analysis collected evidence but did not identify a confident root cause.";
+            };
+        }
+        if (impact != null && impact.level() != null) {
+            summary += " Impact=%s.".formatted(impact.level());
+        }
+        if (degradedReason != null && !degradedReason.isBlank() && !summary.contains(degradedReason)) {
             summary += " " + degradedReason;
         }
         return summary;
@@ -713,6 +826,21 @@ public class DefaultRuleBasedFallbackAnalyzer implements RuleBasedFallbackAnalyz
         }
         AlertTriggerValues triggerValues = alert.triggerValues();
         return triggerValues == null || triggerValues.p99LatencyMs() == null ? 0L : triggerValues.p99LatencyMs();
+    }
+
+    private Double resolveFailureCount(AlertEvent alert, CompressedEvidenceBundle compressedEvidence) {
+        if (compressedEvidence != null && compressedEvidence.alert() != null && compressedEvidence.alert().failureCount() != null) {
+            return compressedEvidence.alert().failureCount();
+        }
+        AlertTriggerValues triggerValues = alert.triggerValues();
+        return triggerValues == null ? null : triggerValues.failureCount();
+    }
+
+    private String firstEvidenceId(RootCauseHypothesis rootCause, String defaultTarget) {
+        return rootCause.evidenceIds().stream()
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(defaultIfBlank(defaultTarget, "UNKNOWN"));
     }
 
     private String humanizeCauseType(String causeType) {

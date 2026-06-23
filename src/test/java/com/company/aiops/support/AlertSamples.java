@@ -54,6 +54,31 @@ public final class AlertSamples {
             Site: cn_product_default
             """;
 
+    public static final String SERVICE_ERROR_LOG_ALERT = """
+            WiseEye Alarm:
+            Status: OPEN
+            Severity: Major
+            Host: CP_all_all_sevice_running_error_activity:{"servicename":"ams_front","cluster":"cluster2"}
+            Category: AIOps@count
+            Details: CP_all_all_sevice_running_error_activity
+            1、告警名称：CP域服务业务错误日志告警
+            2、告警对象：服务名称：ams_front,集群信息：cluster2
+            3、告警信息：失败数=2,发生时间=2026-06-22T13:42:00, 日志=DEFAULT prebook loginAppointment failed
+            4、看板跳转：https://console-drcn.wisedevops.huawei.com/microApp/serviceInsight/aiops5Dashboard#/edit-dashboard?id=9dabb7e8-db11-417a-ade0-a988ad4df9e8
+            AlertName: CP域服务业务错误日志告警,Site: cn_product_default,MetricName: CP_all_all_sevice_running_error_activity,Category: AIOps@count
+            IP Address: null
+            Occur Time: 2026-06-22 13:42:30+08:00
+            Clear Time: null
+            Template: unknown
+            Handler: unknown
+            Alert ID: 554631819
+            Tenant: 电商
+            Application: 电商业务
+            Service: VmallActivityService
+            Site: cn_product_default
+            Source_ID: 5ba509babfa344978b9176d1b6602581
+            """;
+
     private AlertSamples() {
     }
 

@@ -121,20 +121,144 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
 
     @Override
     public ProviderCollectionResult collect(String taskId, AnalysisContext initialContext) {
+        if (initialContext.alert().category() == AlertCategory.SERVICE_ERROR_LOG) {
+            return collectServiceErrorLog(taskId, initialContext);
+        }
+        return collectRpcAlert(taskId, initialContext);
+    }
+
+    private ProviderCollectionResult collectRpcAlert(String taskId, AnalysisContext initialContext) {
+        CommonProviderResults common = collectCommonProviders(taskId, initialContext, true);
+        AnalysisContext context = common.context();
+        List<String> sampledTraceIds = sampleTraceIds(context.alert().category(), common.interfaceLogResult(), context);
+
+        ProviderResult<List<TraceRecord>> traceResult = collectTraces(taskId, context, sampledTraceIds);
+        ProviderResult<List<RuntimeLogEntry>> runtimeLogResult = collectRuntimeLogs(taskId, context, sampledTraceIds);
+
+        BaselineEvidence baselineEvidence = toBaselineEvidence(common.baselineResult());
+        InterfaceLogEvidence interfaceLogEvidence = toInterfaceLogEvidence(common.interfaceLogResult(), sampledTraceIds);
+        TraceEvidence traceEvidence = toTraceEvidence(traceResult, sampledTraceIds);
+        RuntimeLogEvidence runtimeLogEvidence = toRuntimeLogEvidence(runtimeLogResult, sampledTraceIds);
+        MetricEvidence metricEvidence = metricEvidence(common.metricAggregateResult());
+
+        List<ProviderResult<?>> providerResults = providerResults(common, traceResult, runtimeLogResult);
+        List<MissingEvidence> missingEvidence = buildMissingEvidence(context.alert().category(), providerResults);
+
+        boolean interfaceLogUnavailable = common.interfaceLogResult().isFailure();
+        boolean latencyTraceUnavailable = context.alert().category() == AlertCategory.RPC_LATENCY
+                && !sampledTraceIds.isEmpty()
+                && traceResult.isFailure();
+        boolean nonCriticalFailure = providerResults.stream()
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_INTERFACE_LOG))
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_QUERY_MAPPING))
+                .anyMatch(this::hasMissingEvidence);
+        boolean fallbackRequired = interfaceLogUnavailable
+                || latencyTraceUnavailable
+                || (!aiopsProperties.provider().continueOnNonCriticalFailure() && nonCriticalFailure);
+        boolean degradedByProviderFailure = !missingEvidence.isEmpty();
+        String degradedReason = buildDegradedReason(
+                interfaceLogUnavailable,
+                latencyTraceUnavailable,
+                nonCriticalFailure,
+                missingEvidence
+        );
+
+        return new ProviderCollectionResult(
+                context,
+                baselineEvidence,
+                interfaceLogEvidence,
+                traceEvidence,
+                runtimeLogEvidence,
+                metricEvidence,
+                missingEvidence,
+                degradedByProviderFailure,
+                fallbackRequired,
+                degradedReason,
+                providerResults
+        );
+    }
+
+    private ProviderCollectionResult collectServiceErrorLog(String taskId, AnalysisContext initialContext) {
+        CommonProviderResults common = collectCommonProviders(taskId, initialContext, false);
+        AnalysisContext context = common.context();
+
+        RuntimeLogMessageLookup runtimeLogLookup = collectRuntimeLogsByMessage(taskId, context);
+        List<String> sampledTraceIds = runtimeLogLookup.sampledTraceIds();
+        ProviderResult<List<TraceRecord>> traceResult = collectTraces(
+                taskId,
+                context,
+                sampledTraceIds,
+                "runtime logs"
+        );
+
+        BaselineEvidence baselineEvidence = toBaselineEvidence(common.baselineResult());
+        InterfaceLogEvidence interfaceLogEvidence = toInterfaceLogEvidence(common.interfaceLogResult(), List.of());
+        TraceEvidence traceEvidence = toTraceEvidence(traceResult, sampledTraceIds, "runtime logs");
+        RuntimeLogEvidence runtimeLogEvidence = runtimeLogLookup.evidence();
+        MetricEvidence metricEvidence = metricEvidence(common.metricAggregateResult());
+
+        List<ProviderResult<?>> providerResults = providerResults(common, traceResult, runtimeLogLookup.result());
+        List<MissingEvidence> missingEvidence = buildMissingEvidence(context.alert().category(), providerResults);
+
+        boolean runtimeLogUnavailable = runtimeLogLookup.result().isFailure();
+        boolean nonCriticalFailure = providerResults.stream()
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_INTERFACE_LOG))
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_QUERY_MAPPING))
+                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_RUNTIME_LOG))
+                .anyMatch(this::hasMissingEvidence);
+        boolean fallbackRequired = runtimeLogUnavailable
+                || (!aiopsProperties.provider().continueOnNonCriticalFailure() && nonCriticalFailure);
+        boolean degradedByProviderFailure = !missingEvidence.isEmpty();
+        String degradedReason = buildServiceErrorLogDegradedReason(
+                runtimeLogUnavailable,
+                nonCriticalFailure,
+                missingEvidence
+        );
+
+        return new ProviderCollectionResult(
+                context,
+                baselineEvidence,
+                interfaceLogEvidence,
+                traceEvidence,
+                runtimeLogEvidence,
+                metricEvidence,
+                missingEvidence,
+                degradedByProviderFailure,
+                fallbackRequired,
+                degradedReason,
+                providerResults
+        );
+    }
+
+    private CommonProviderResults collectCommonProviders(
+            String taskId,
+            AnalysisContext initialContext,
+            boolean collectInterfaceLogs
+    ) {
         CompletableFuture<ProviderResult<ResourceMapping>> resourceMappingFuture = schedule(() ->
                 execute(taskId, initialContext, PROVIDER_RESOURCE_MAPPING, false, () ->
                         resourceMappingProvider.queryResourceMapping(
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().cluster()
                         )));
-        CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() ->
-                execute(taskId, initialContext, PROVIDER_INTERFACE_LOG, true, () ->
+        CompletableFuture<ProviderResult<List<InterfaceLogEntry>>> interfaceLogFuture = schedule(() -> {
+            if (!collectInterfaceLogs) {
+                return providerCallExecutor.skipped(
+                        taskId,
+                        initialContext.alert().alertId(),
+                        PROVIDER_INTERFACE_LOG,
+                        false,
+                        "SERVICE_ERROR_LOG alerts do not include interfaceName; interface-log lookup skipped"
+                );
+            }
+            return execute(taskId, initialContext, PROVIDER_INTERFACE_LOG, true, () ->
                         interfaceLogProvider.queryByInterface(
                                 initialContext.alert().serviceName(),
                                 initialContext.alert().interfaceName(),
                                 initialContext.alarmWindow(),
                                 initialContext.options().maxInterfaceLogLimit()
-                        )));
+                        ));
+        });
         ProviderResult<ProviderQueryTargets> providerQueryTargetsResult = execute(
                 taskId,
                 initialContext,
@@ -228,10 +352,6 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
         ProviderResult<DcsMetrics> dcsMetricResult = join(dcsMetricFuture);
         ProviderResult<MqMetrics> mqMetricResult = join(mqMetricFuture);
 
-        List<String> sampledTraceIds = sampleTraceIds(context.alert().category(), interfaceLogResult, context);
-
-        ProviderResult<List<TraceRecord>> traceResult = collectTraces(taskId, context, sampledTraceIds);
-        ProviderResult<List<RuntimeLogEntry>> runtimeLogResult = collectRuntimeLogs(taskId, context, sampledTraceIds);
         ProviderResult<MetricEvidence> metricAggregateResult = aggregateMetricResults(
                 containerMetricResult,
                 cseMetricResult,
@@ -240,15 +360,8 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                 mqMetricResult
         );
 
-        BaselineEvidence baselineEvidence = toBaselineEvidence(baselineResult);
-        InterfaceLogEvidence interfaceLogEvidence = toInterfaceLogEvidence(interfaceLogResult, sampledTraceIds);
-        TraceEvidence traceEvidence = toTraceEvidence(traceResult, sampledTraceIds);
-        RuntimeLogEvidence runtimeLogEvidence = toRuntimeLogEvidence(runtimeLogResult, sampledTraceIds);
-        MetricEvidence metricEvidence = metricAggregateResult.data() == null
-                ? MetricEvidence.missing(metricAggregateResult.errorMessage())
-                : metricAggregateResult.data();
-
-        List<ProviderResult<?>> providerResults = List.of(
+        return new CommonProviderResults(
+                context,
                 providerQueryTargetsResult,
                 resourceMappingResult,
                 baselineResult,
@@ -258,43 +371,56 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                 databaseMetricResult,
                 dcsMetricResult,
                 mqMetricResult,
+                metricAggregateResult
+        );
+    }
+
+    private List<ProviderResult<?>> providerResults(
+            CommonProviderResults common,
+            ProviderResult<List<TraceRecord>> traceResult,
+            ProviderResult<List<RuntimeLogEntry>> runtimeLogResult
+    ) {
+        return List.of(
+                common.providerQueryTargetsResult(),
+                common.resourceMappingResult(),
+                common.baselineResult(),
+                common.interfaceLogResult(),
+                common.containerMetricResult(),
+                common.cseMetricResult(),
+                common.databaseMetricResult(),
+                common.dcsMetricResult(),
+                common.mqMetricResult(),
                 traceResult,
                 runtimeLogResult
         );
-        List<MissingEvidence> missingEvidence = buildMissingEvidence(context.alert().category(), providerResults);
+    }
 
-        boolean interfaceLogUnavailable = interfaceLogResult.isFailure();
-        boolean latencyTraceUnavailable = context.alert().category() == AlertCategory.RPC_LATENCY
-                && !sampledTraceIds.isEmpty()
-                && traceResult.isFailure();
-        boolean nonCriticalFailure = providerResults.stream()
-                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_INTERFACE_LOG))
-                .filter(result -> !Objects.equals(result.providerName(), PROVIDER_QUERY_MAPPING))
-                .anyMatch(this::hasMissingEvidence);
-        boolean fallbackRequired = interfaceLogUnavailable
-                || latencyTraceUnavailable
-                || (!aiopsProperties.provider().continueOnNonCriticalFailure() && nonCriticalFailure);
-        boolean degradedByProviderFailure = !missingEvidence.isEmpty();
-        String degradedReason = buildDegradedReason(
-                interfaceLogUnavailable,
-                latencyTraceUnavailable,
-                nonCriticalFailure,
-                missingEvidence
-        );
+    private MetricEvidence metricEvidence(ProviderResult<MetricEvidence> metricAggregateResult) {
+        return metricAggregateResult.data() == null
+                ? MetricEvidence.missing(metricAggregateResult.errorMessage())
+                : metricAggregateResult.data();
+    }
 
-        return new ProviderCollectionResult(
-                context,
-                baselineEvidence,
-                interfaceLogEvidence,
-                traceEvidence,
-                runtimeLogEvidence,
-                metricEvidence,
-                missingEvidence,
-                degradedByProviderFailure,
-                fallbackRequired,
-                degradedReason,
-                providerResults
-        );
+    private record CommonProviderResults(
+            AnalysisContext context,
+            ProviderResult<ProviderQueryTargets> providerQueryTargetsResult,
+            ProviderResult<ResourceMapping> resourceMappingResult,
+            ProviderResult<InterfaceBaseline> baselineResult,
+            ProviderResult<List<InterfaceLogEntry>> interfaceLogResult,
+            ProviderResult<ContainerMetrics> containerMetricResult,
+            ProviderResult<CseMetrics> cseMetricResult,
+            ProviderResult<DatabaseMetrics> databaseMetricResult,
+            ProviderResult<DcsMetrics> dcsMetricResult,
+            ProviderResult<MqMetrics> mqMetricResult,
+            ProviderResult<MetricEvidence> metricAggregateResult
+    ) {
+    }
+
+    private record RuntimeLogMessageLookup(
+            ProviderResult<List<RuntimeLogEntry>> result,
+            RuntimeLogEvidence evidence,
+            List<String> sampledTraceIds
+    ) {
     }
 
     private <T> CompletableFuture<ProviderResult<T>> schedule(Supplier<ProviderResult<T>> supplier) {
@@ -354,7 +480,7 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                                     .limit(context.options().maxSlowTraceSampleSize())
                                     .toList()
                     ));
-            case UNKNOWN -> List.of();
+            case SERVICE_ERROR_LOG, UNKNOWN -> List.of();
         };
     }
 
@@ -363,13 +489,22 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
             AnalysisContext context,
             List<String> sampledTraceIds
     ) {
+        return collectTraces(taskId, context, sampledTraceIds, "interface logs");
+    }
+
+    private ProviderResult<List<TraceRecord>> collectTraces(
+            String taskId,
+            AnalysisContext context,
+            List<String> sampledTraceIds,
+            String traceIdSource
+    ) {
         if (sampledTraceIds.isEmpty()) {
             return providerCallExecutor.skipped(
                     taskId,
                     context.alert().alertId(),
                     PROVIDER_TRACE,
                     context.alert().category() == AlertCategory.RPC_LATENCY,
-                    "no sampled trace ids available from interface logs"
+                    "no sampled trace ids available from " + traceIdSource
                 );
         }
 
@@ -431,6 +566,156 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                 .limit(context.options().maxRuntimeLogSize())
                 .toList();
         return aggregateResults(PROVIDER_RUNTIME_LOG, mergedEntries, results, "runtime-log queries skipped");
+    }
+
+    private RuntimeLogMessageLookup collectRuntimeLogsByMessage(String taskId, AnalysisContext context) {
+        String level = defaultIfBlank(context.options().errorLogQueryLevel(), "ERROR");
+        List<String> candidates = runtimeLogMessageQueryCandidates(context);
+        List<RuntimeLogEvidence.QueryAttempt> queryAttempts = new ArrayList<>();
+        List<ProviderResult<List<RuntimeLogEntry>>> attemptResults = new ArrayList<>();
+
+        for (int index = 0; index < candidates.size(); index++) {
+            String candidate = candidates.get(index);
+            ProviderResult<List<RuntimeLogEntry>> attemptResult = execute(
+                    taskId,
+                    context,
+                    PROVIDER_RUNTIME_LOG,
+                    true,
+                    () -> runtimeLogProvider.queryByMessage(
+                            context.alert().serviceName(),
+                            context.alert().cluster(),
+                            level,
+                            candidate,
+                            context.alarmWindow(),
+                            context.options().maxRuntimeLogSize()
+                    )
+            );
+            attemptResults.add(attemptResult);
+            List<RuntimeLogEntry> entries = attemptResult.isUsable() && attemptResult.data() != null
+                    ? attemptResult.data().stream().limit(context.options().maxRuntimeLogSize()).toList()
+                    : List.of();
+            boolean selected = !entries.isEmpty();
+            queryAttempts.add(new RuntimeLogEvidence.QueryAttempt(
+                    "runtime.query.attempt." + (index + 1),
+                    candidate,
+                    level,
+                    entries.size(),
+                    selected
+            ));
+            if (attemptResult.isFailure()) {
+                String reason = defaultIfBlank(
+                        attemptResult.errorMessage(),
+                        "runtime log message query failed"
+                );
+                return new RuntimeLogMessageLookup(
+                        attemptResult,
+                        missingRuntimeLogEvidence(reason, queryAttempts),
+                        List.of()
+                );
+            }
+            if (selected) {
+                List<String> sampledTraceIds = sampleTraceIdsFromRuntimeLogs(entries, context);
+                ProviderResult<List<RuntimeLogEntry>> result = ProviderResult.success(
+                        PROVIDER_RUNTIME_LOG,
+                        entries,
+                        sumLatency(attemptResults)
+                );
+                RuntimeLogEvidence evidence = RuntimeLogEvidence.availableMessageQuery(
+                        entries,
+                        candidate,
+                        queryAttempts,
+                        sampledTraceIds
+                );
+                return new RuntimeLogMessageLookup(result, evidence, sampledTraceIds);
+            }
+        }
+
+        String reason = "Could not locate " + level + " runtime log context from alert message queries.";
+        ProviderResult<List<RuntimeLogEntry>> result = ProviderResult.failure(
+                PROVIDER_RUNTIME_LOG,
+                "RUNTIME_LOG_CONTEXT_MISSING",
+                reason,
+                sumLatency(attemptResults)
+        );
+        return new RuntimeLogMessageLookup(result, missingRuntimeLogEvidence(reason, queryAttempts), List.of());
+    }
+
+    private RuntimeLogEvidence missingRuntimeLogEvidence(
+            String reason,
+            List<RuntimeLogEvidence.QueryAttempt> queryAttempts
+    ) {
+        return new RuntimeLogEvidence(List.of(), false, reason, false, null, queryAttempts, List.of());
+    }
+
+    private List<String> runtimeLogMessageQueryCandidates(AnalysisContext context) {
+        if (context.alert().triggerValues() == null
+                || !hasText(context.alert().triggerValues().normalizedLogQuery())) {
+            return List.of();
+        }
+        String[] tokens = context.alert().triggerValues().normalizedLogQuery().trim().split("\\s+");
+        List<String> rawCandidates = new ArrayList<>();
+        rawCandidates.add(joinTokens(tokens, 0, tokens.length));
+        if (tokens.length > 1) {
+            rawCandidates.add(joinTokens(tokens, 1, tokens.length));
+        }
+        if (tokens.length > 2) {
+            rawCandidates.add(joinTokens(tokens, 2, tokens.length));
+        }
+        if (tokens.length >= 2) {
+            rawCandidates.add(joinTokens(tokens, tokens.length - 2, tokens.length));
+        }
+
+        int minChars = context.options().errorLogMessageQueryMinChars();
+        int minTokens = context.options().errorLogMessageQueryMinTokens();
+        int maxAttempts = context.options().errorLogMessageQueryMaxAttempts();
+        return rawCandidates.stream()
+                .map(String::trim)
+                .filter(this::hasText)
+                .collect(Collectors.collectingAndThen(
+                        Collectors.toCollection(LinkedHashSet::new),
+                        candidates -> candidates.stream()
+                                .filter(candidate -> candidate.length() >= minChars)
+                                .filter(candidate -> tokenCount(candidate) >= minTokens)
+                                .limit(maxAttempts)
+                                .toList()
+                ));
+    }
+
+    private String joinTokens(String[] tokens, int startInclusive, int endExclusive) {
+        StringBuilder builder = new StringBuilder();
+        for (int index = startInclusive; index < endExclusive; index++) {
+            if (builder.length() > 0) {
+                builder.append(' ');
+            }
+            builder.append(tokens[index]);
+        }
+        return builder.toString();
+    }
+
+    private int tokenCount(String value) {
+        if (!hasText(value)) {
+            return 0;
+        }
+        return value.trim().split("\\s+").length;
+    }
+
+    private List<String> sampleTraceIdsFromRuntimeLogs(List<RuntimeLogEntry> entries, AnalysisContext context) {
+        return entries.stream()
+                .map(RuntimeLogEntry::traceId)
+                .filter(this::hasText)
+                .collect(Collectors.collectingAndThen(
+                        Collectors.toCollection(LinkedHashSet::new),
+                        traceIds -> traceIds.stream()
+                                .limit(context.options().maxTraceSampleSize())
+                                .toList()
+                ));
+    }
+
+    private Duration sumLatency(List<? extends ProviderResult<?>> results) {
+        return results.stream()
+                .map(ProviderResult::latency)
+                .filter(Objects::nonNull)
+                .reduce(Duration.ZERO, Duration::plus);
     }
 
     private ProviderResult<MetricEvidence> aggregateMetricResults(
@@ -519,11 +804,19 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
     }
 
     private TraceEvidence toTraceEvidence(ProviderResult<List<TraceRecord>> traceResult, List<String> sampledTraceIds) {
+        return toTraceEvidence(traceResult, sampledTraceIds, "interface logs");
+    }
+
+    private TraceEvidence toTraceEvidence(
+            ProviderResult<List<TraceRecord>> traceResult,
+            List<String> sampledTraceIds,
+            String traceIdSource
+    ) {
         if (traceResult.isUsable() && traceResult.data() != null) {
             return TraceEvidence.available(traceResult.data());
         }
         if (sampledTraceIds.isEmpty()) {
-            return TraceEvidence.missing("no sampled trace ids available from interface logs");
+            return TraceEvidence.missing("no sampled trace ids available from " + traceIdSource);
         }
         return TraceEvidence.missing(traceResult.errorMessage());
     }
@@ -575,7 +868,10 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
 
     private boolean isCriticalProvider(String providerName, AlertCategory category) {
         if (PROVIDER_INTERFACE_LOG.equals(providerName)) {
-            return true;
+            return category != AlertCategory.SERVICE_ERROR_LOG;
+        }
+        if (PROVIDER_RUNTIME_LOG.equals(providerName)) {
+            return category == AlertCategory.SERVICE_ERROR_LOG;
         }
         return category == AlertCategory.RPC_LATENCY && PROVIDER_TRACE.equals(providerName);
     }
@@ -589,7 +885,9 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
                             ? "Cannot verify downstream slow spans for the latency alert."
                             : "Downstream trace topology is incomplete.";
             case PROVIDER_RUNTIME_LOG ->
-                    "WARN/ERROR runtime log samples are unavailable for this alert window.";
+                    category == AlertCategory.SERVICE_ERROR_LOG
+                            ? "Cannot locate the ERROR runtime log context that triggered this service-level alert."
+                            : "WARN/ERROR runtime log samples are unavailable for this alert window.";
             case PROVIDER_BASELINE ->
                     "Historical comparison for the same time window is unavailable.";
             case PROVIDER_QUERY_MAPPING ->
@@ -621,6 +919,21 @@ public class DefaultProviderOrchestrator implements ProviderOrchestrator {
         }
         if (latencyTraceUnavailable) {
             return "Trace evidence is unavailable for a latency alert, so downstream slow-point confirmation is not possible.";
+        }
+        if (nonCriticalFailure && !missingEvidence.isEmpty()) {
+            return "Provider collection finished with missing evidence from: "
+                    + missingEvidence.stream().map(MissingEvidence::providerName).distinct().collect(Collectors.joining(", "));
+        }
+        return null;
+    }
+
+    private String buildServiceErrorLogDegradedReason(
+            boolean runtimeLogUnavailable,
+            boolean nonCriticalFailure,
+            List<MissingEvidence> missingEvidence
+    ) {
+        if (runtimeLogUnavailable) {
+            return "Could not locate ERROR runtime log context from alert message queries.";
         }
         if (nonCriticalFailure && !missingEvidence.isEmpty()) {
             return "Provider collection finished with missing evidence from: "

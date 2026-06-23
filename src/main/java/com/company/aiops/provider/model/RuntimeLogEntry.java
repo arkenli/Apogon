@@ -7,9 +7,16 @@ import java.time.Instant;
  */
 public record RuntimeLogEntry(
         String serviceName,
+        String cluster,
+        String instanceId,
         String traceId,
+        String spanId,
         String level,
+        String logger,
+        String threadName,
         String message,
+        String exceptionType,
+        String stackTop,
         Instant timestamp
 ) {
 }

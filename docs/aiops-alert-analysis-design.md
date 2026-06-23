@@ -13,7 +13,7 @@
 ### 1.1 一期目标
 
 1. 支持通过 Webhook 接收 WiseEye 告警。
-2. 支持 RPC 接口错误率告警和 RPC 接口时延告警。
+2. 支持 RPC 接口错误率告警、RPC 接口时延告警和服务错误日志告警。
 3. 支持按告警类别路由到不同分析策略。
 4. 支持抽象现有监控、日志、Trace、资源映射、基线数据 HTTP 查询能力。
 5. 支持抽象 LLM 调用能力，便于切换 OpenAI-compatible、内部模型或本地模型。
@@ -42,9 +42,11 @@
 8. LLM：通过抽象接口适配不同模型。
 9. 自动处置：只给建议，不执行动作。
 10. Webhook 鉴权：暂不需要。
-11. 去重规则：同一 `serviceName + interfaceName + category + cluster` 5 分钟内合并。
+11. 去重规则：接口类告警按同一 `serviceName + interfaceName + category + cluster` 5 分钟内合并；服务错误日志告警按同一 `serviceName + cluster + category + logSignature` 5 分钟内合并。
 12. 存储周期：分析结果长期保存；原始证据包、LLM 输入输出保存 30 天。
 13. LLM 失败降级：执行基于规则的降级分析策略，返回同构分析结果，并明确标注结论来源为规则降级策略。
+14. 服务错误日志告警默认没有接口名，必须先根据告警日志 `msg` 查询 ERROR 级别运行日志上下文，再从命中日志中提取 traceId、实例、异常类型和堆栈摘要。
+15. 服务错误日志告警的告警 `msg` 在查询前必须移除开头单独出现的 `DEFAULT` 包装前缀；如果完整 msg 查询不到日志，需要按日志切割策略逐步缩短查询词并保留每次查询尝试记录。
 
 ## 3. 总体架构
 
@@ -69,6 +71,7 @@ AnalysisOrchestrator
     |-- AnalysisStrategyRegistry
     |       |-- RpcErrorRateAnalysisStrategy
     |       |-- RpcLatencyAnalysisStrategy
+    |       |-- ServiceErrorLogAnalysisStrategy
     |
     |-- Data Providers
     |       |-- MetricProvider
@@ -81,6 +84,7 @@ AnalysisOrchestrator
     |-- RuleAnalyzers
     |       |-- ErrorRateRuleAnalyzer
     |       |-- LatencyRuleAnalyzer
+    |       |-- ErrorLogRuleAnalyzer
     |       |-- MetricAnomalyDetector
     |       |-- TraceTopologyAnalyzer
     |
@@ -201,6 +205,7 @@ com.company.aiops
 public enum AlertCategory {
     RPC_ERROR_RATE,
     RPC_LATENCY,
+    SERVICE_ERROR_LOG,
     UNKNOWN
 }
 ```
@@ -240,6 +245,10 @@ public record AlertTriggerValues(
     Long avgLatencyMs,
     Long p99LatencyMs,
     Long maxLatencyMs,
+    Double failureCount,
+    String logLevel,
+    String logMessage,
+    String normalizedLogQuery,
     String thresholdExpression,
     String rawMetricValueText
 ) {}
@@ -248,7 +257,7 @@ public record AlertTriggerValues(
 说明：
 
 1. 不使用 `Map<String, Object>`，避免字段语义不清、后续代码大量强制类型转换，也便于 AI 和开发人员按明确字段实现。
-2. 不同告警类型只填充相关字段，例如错误率告警填充 `requestCount` 和 `failRate`，时延告警填充 `requestCount`、`avgLatencyMs` 或 `p99LatencyMs`。
+2. 不同告警类型只填充相关字段，例如错误率告警填充 `requestCount` 和 `failRate`，时延告警填充 `requestCount`、`avgLatencyMs` 或 `p99LatencyMs`，服务错误日志告警填充 `failureCount`、`logLevel`、`logMessage` 和 `normalizedLogQuery`。
 3. 无法结构化解析的原始指标片段放入 `rawMetricValueText`，后续新增字段时通过扩展 `AlertTriggerValues` 明确建模。
 
 `triggerValues` 示例：
@@ -260,6 +269,10 @@ public record AlertTriggerValues(
   "avgLatencyMs": 3067,
   "p99LatencyMs": null,
   "maxLatencyMs": null,
+  "failureCount": null,
+  "logLevel": null,
+  "logMessage": null,
+  "normalizedLogQuery": null,
   "thresholdExpression": "avg_latency > 3000ms for 5m",
   "rawMetricValueText": "平均时延=3067, 请求总数=49.0"
 }
@@ -335,7 +348,8 @@ public record AnalysisContext(
 
 1. 错误率告警：`occurTime - 5m` 到 `occurTime + 2m`。
 2. 时延告警：`occurTime - 10m` 到 `occurTime + 2m`。
-3. 基线：默认取前一天同时间段，避免最近 7 天大范围查询导致接口慢或查不出数据。
+3. 服务错误日志告警：`occurTime - 5m` 到 `occurTime + 2m`，用于按 msg 反查触发告警的 ERROR 日志上下文。
+4. 基线：默认取前一天同时间段，避免最近 7 天大范围查询导致接口慢或查不出数据。
 
 通用 DTO：
 
@@ -378,7 +392,7 @@ public record EvidenceBundle(
 1. `BaselineEvidence` 直接包装 `InterfaceBaseline` 和缺失原因。
 2. `InterfaceLogEvidence` 至少包含总请求数、失败数、失败率、时延分布、errorCode/errorMsg 聚合、uid 聚合和样本日志。
 3. `TraceEvidence` 至少包含采样 traceId、每条 trace 的关键 span、首个失败 span、最慢 span 和下游聚合。
-4. `RuntimeLogEvidence` 至少包含按 traceId 和 serviceName 查询到的 WARN/ERROR 日志样本。
+4. `RuntimeLogEvidence` 至少包含按 traceId 和 serviceName 查询到的 WARN/ERROR 日志样本；服务错误日志告警还必须包含按 `serviceName + cluster + level=ERROR + msg` 查询的命中日志、traceId 提取结果、查询词切割尝试记录和命中使用的 `matchedLogQuery`。
 5. `MetricEvidence` 至少包含容器、CSE、DB、DCS、MQ 的指标异常列表和 Provider 缺失信息。
 6. `RuleAnalysisEvidence` 至少包含规则发现列表、候选根因分数和 evidenceId 索引。
 7. 每个 Evidence 子对象都要能表达“数据缺失”，不能用 null 让后续分析器猜测是无异常还是未查询到。
@@ -501,6 +515,8 @@ GC_PRESSURE
 INSTANCE_STARTING_OR_FAILED
 SINGLE_INSTANCE_ABNORMAL
 TRAFFIC_SPIKE
+CURRENT_SERVICE_RUNTIME_EXCEPTION
+REPEATED_BUSINESS_LOG_ERROR
 UNKNOWN
 ```
 
@@ -600,7 +616,7 @@ public interface AlertParser {
 1. 从 `Alert ID:` 提取 alertId。
 2. 从 `Category:` 提取 rawCategory。
 3. 从 `Host:` 后面的 JSON 提取 serviceName、interfaceName、cluster。
-4. 从 `Details:` 中提取请求数、失败率、平均时延、P99、告警发生时间。
+4. 从 `Details:` 中提取请求数、失败率、平均时延、P99、失败数、日志 msg、告警发生时间。
 5. 从 `Occur Time:` 提取告警展示时间。
 6. 保留 rawText，便于后续审计。
 
@@ -609,6 +625,8 @@ public interface AlertParser {
 1. 告警文本中 serviceName 可能出现 `servicename`、`服务名称`、`serviceName` 多种写法。
 2. interfaceName 可能包含 `://`、`/`、`.`、`_` 等特殊字符，不能使用过窄正则。
 3. `Details` 中的发生时间通常比 `Occur Time` 更接近指标触发时间，应优先作为 `metricOccurTime`。
+4. 服务错误日志告警默认没有 `interfaceName`，不能因为接口名为空直接解析失败；但必须解析出 `serviceName`、`cluster`、`metricOccurTime` 和日志 msg。
+5. 服务错误日志告警中 `告警信息` 里的 `日志=` 内容应写入 `logMessage`；构造 Provider 查询前应生成 `normalizedLogQuery`，规则是 trim 后移除开头单独出现的 `DEFAULT` token，再规整连续空白。
 
 ### 7.2 AlertClassifier
 
@@ -622,18 +640,24 @@ public interface AlertClassifier {
 
 1. `rawCategory == "AIOps@rate"` -> `RPC_ERROR_RATE`。
 2. `rawCategory == "AIOps@delay"` -> `RPC_LATENCY`。
-3. `metricName` 包含 `failrate`、`successrate`、`error` -> `RPC_ERROR_RATE`。
-4. `metricName` 包含 `delay`、`latency`、`p99`、`avg` -> `RPC_LATENCY`。
-5. 以上都不匹配 -> `UNKNOWN`。
+3. `rawCategory == "AIOps@count"` 且 `metricName` 包含 `service_running_error`、`running_error`、`error_activity` 或 `alertName` 包含“错误日志” -> `SERVICE_ERROR_LOG`。
+4. `metricName` 包含 `failrate`、`successrate`、`error` -> `RPC_ERROR_RATE`。
+5. `metricName` 包含 `delay`、`latency`、`p99`、`avg` -> `RPC_LATENCY`。
+6. 以上都不匹配 -> `UNKNOWN`。
+
+分类顺序必须保证服务错误日志规则先于 `metricName contains error -> RPC_ERROR_RATE`，避免 `CP_all_all_sevice_running_error_activity` 被误判为接口错误率告警。
 
 LLM 分类只作为后续增强，不作为主路径。一期遇到 `UNKNOWN` 应记录任务失败或返回不支持分析。
 
 ### 7.3 去重规则
 
 ```text
-dedupeKey = category + "|" + serviceName + "|" + interfaceName + "|" + cluster
+interface alert dedupeKey = category + "|" + serviceName + "|" + interfaceName + "|" + cluster
+service error log dedupeKey = category + "|" + serviceName + "|" + cluster + "|" + logSignature
 dedupeWindow = 5 minutes
 ```
+
+`logSignature` 由 `normalizedLogQuery` 生成。生成时应去除 traceId、spanId、uid、纯数字 ID、时间戳、UUID 等高变化片段，保留稳定业务动作和异常短语。例如 `DEFAULT prebook loginAppointment failed` 的查询词为 `prebook loginAppointment failed`，签名也应基于该归一化文本生成。
 
 如果窗口内已有 `PENDING`、`RUNNING`、`SUCCESS`、`DEGRADED_SUCCESS` 任务，则新告警关联到旧任务，不重复分析。
 
@@ -667,7 +691,7 @@ Provider 分为两类：
 
 ### 8.0 Provider 并行调用与降级方案
 
-Provider 之间没有管理或数据依赖关系时，应并行调用以降低整体分析耗时。例如容器指标、数据库指标、DCS 指标、MQ 指标、基线数据、接口日志可以在同一阶段并行获取；Trace 明细依赖接口日志中的 traceId，应在接口日志返回后再并行查询。
+Provider 之间没有管理或数据依赖关系时，应并行调用以降低整体分析耗时。例如容器指标、数据库指标、DCS 指标、MQ 指标、基线数据、接口日志可以在同一阶段并行获取；Trace 明细依赖接口日志或运行日志中的 traceId，应在 traceId 返回后再并行查询。
 
 推荐执行模型：
 
@@ -675,6 +699,15 @@ Provider 之间没有管理或数据依赖关系时，应并行调用以降低�
 阶段 1：并行获取 ResourceMapping、Baseline、InterfaceLog、ContainerMetrics、CseMetrics
 阶段 2：ResourceMapping 返回后，并行获取 DatabaseMetrics、DcsMetrics、MqMetrics
 阶段 3：InterfaceLog 返回后，抽样 traceId，并行获取 Trace 和 RuntimeLog
+阶段 4：汇总 ProviderResult，进入规则预分析
+```
+
+服务错误日志告警不依赖接口名，推荐执行模型：
+
+```text
+阶段 1：并行获取 ResourceMapping、Baseline、ContainerMetrics、CseMetrics、RuntimeLog(level=ERROR,msg)
+阶段 2：ResourceMapping 返回后，并行获取 DatabaseMetrics、DcsMetrics、MqMetrics
+阶段 3：RuntimeLog 返回后，从命中日志提取 traceId，并行获取 Trace 和 InterfaceLog
 阶段 4：汇总 ProviderResult，进入规则预分析
 ```
 
@@ -724,18 +757,19 @@ public enum ProviderStatus {
 3. TraceProvider 失败时，错误率告警仍可基于接口日志、errorMsg 和资源指标分析；时延告警需要降低下游慢点判断置信度，并输出 missingEvidence。
 4. MetricProvider、BaselineProvider、RuntimeLogProvider 部分失败时，继续分析，降低相关根因置信度。
 5. ResourceMappingProvider 失败通常表示本地配置缺失或数据库异常。服务资源映射缺失时继续分析接口日志和容器指标，但跳过 DB/DCS/MQ 指标；ResourceMapping 表不可读时标记为 Provider 失败。
+6. 服务错误日志告警中，按完整 msg 查询不到日志时不能立即降级，必须按 11A.3.1 的日志切割策略继续查询；所有切割查询仍必须带 `level=ERROR`。只有全部查询尝试都无命中，才输出 `analysisMode=RULE_BASED_DEGRADED`、主根因为 `UNKNOWN`，并说明“无法定位告警日志对应的 ERROR 运行日志上下文”。
 
 关键性矩阵：
 
-| Provider | 错误率告警 | 时延告警 | 失败后的默认处理 |
-| --- | --- | --- | --- |
-| InterfaceLogProvider | 关键 | 关键 | 输出规则降级结果，状态 `DEGRADED_SUCCESS` |
-| TraceProvider | 重要 | 关键 | 错误率继续分析；时延输出降级结果或显著降低下游判断置信度 |
-| RuntimeLogProvider | 可选 | 可选 | 记录 missingEvidence，继续分析 |
-| MetricProvider.Container/CSE | 重要 | 重要 | 记录 missingEvidence，继续分析 |
-| MetricProvider.DB/DCS/MQ | 可选，依赖 ResourceMapping | 重要，依赖 ResourceMapping | 映射存在但指标失败时记录 missingEvidence，继续分析 |
-| BaselineProvider | 重要 | 重要 | 记录 missingEvidence，继续分析，不做基线突增判断 |
-| ResourceMappingProvider | 重要 | 重要 | 映射缺失时跳过依赖资源指标；表不可读时记录 Provider 失败 |
+| Provider | 错误率告警 | 时延告警 | 服务错误日志告警 | 失败后的默认处理 |
+| --- | --- | --- | --- | --- |
+| InterfaceLogProvider | 关键 | 关键 | 重要，依赖 traceId | 错误率/时延输出规则降级结果；服务错误日志无 traceId 时跳过接口日志并降低下游判断置信度 |
+| TraceProvider | 重要 | 关键 | 重要，依赖 traceId | 错误率继续分析；时延输出降级结果或显著降低下游判断置信度；服务错误日志记录 missingEvidence |
+| RuntimeLogProvider | 可选 | 可选 | 关键 | 错误率/时延记录 missingEvidence 继续分析；服务错误日志必须先执行 msg 切割查询，全部无命中后输出规则降级结果 |
+| MetricProvider.Container/CSE | 重要 | 重要 | 重要 | 记录 missingEvidence，继续分析 |
+| MetricProvider.DB/DCS/MQ | 可选，依赖 ResourceMapping | 重要，依赖 ResourceMapping | 重要，依赖 ResourceMapping 和日志/trace 关键词 | 映射存在但指标失败时记录 missingEvidence，继续分析 |
+| BaselineProvider | 重要 | 重要 | 重要 | 记录 missingEvidence，继续分析，不做基线突增判断 |
+| ResourceMappingProvider | 重要 | 重要 | 重要 | 映射缺失时跳过依赖资源指标；表不可读时记录 Provider 失败 |
 
 ### 8.1 MetricProvider
 
@@ -840,18 +874,42 @@ public interface RuntimeLogProvider {
         TimeWindow window,
         int limit
     );
+
+    List<RuntimeLogEntry> queryByMessage(
+        String serviceName,
+        String cluster,
+        String level,
+        String messageQuery,
+        TimeWindow window,
+        int limit
+    );
 }
 ```
 
 ```java
 public record RuntimeLogEntry(
     String serviceName,
+    String cluster,
+    String instanceId,
     String traceId,
+    String spanId,
     String level,
+    String logger,
+    String threadName,
     String message,
+    String exceptionType,
+    String stackTop,
     Instant timestamp
 ) {}
 ```
+
+`queryByMessage` 用于服务错误日志告警的首轮证据定位。调用约束：
+
+1. `level` 必须传 `ERROR`，因为只有 ERROR 级别日志触发该类告警；不能扩大到 WARN/INFO 后再让规则或 LLM 过滤。
+2. `messageQuery` 必须使用移除开头 `DEFAULT` 包装前缀后的 `normalizedLogQuery`。
+3. Provider 返回结果应尽量包含 traceId、spanId、实例或 pod、logger、thread、异常类型、堆栈顶部和原始 message。
+4. 如果日志系统支持短语匹配，优先使用 phrase/match_phrase；不支持时也必须保证 level、serviceName、cluster、timeWindow 是强过滤条件。
+5. Provider 调用日志需要记录本次查询使用的 `messageQuery` 和命中数量，便于审计为什么后续 traceId 来自某条日志。
 
 ### 8.5 BaselineProvider
 
@@ -1327,6 +1385,216 @@ if currentRequestCount > baselineRequestCount * 2:
 6. 是否存在请求量突增。
 7. 建议优先查看的 traceId、服务、接口、资源实例。
 
+## 11A. 服务错误日志告警分析策略
+
+类名：
+
+```java
+public class ServiceErrorLogAnalysisStrategy implements AnalysisStrategy
+```
+
+### 11A.1 适用场景
+
+服务运行日志 ERROR 数量触发告警，告警对象只有 `serviceName` 和 `cluster`，默认没有 `interfaceName`。系统需要先根据告警中的日志 msg 反查运行日志上下文，从命中日志中提取 traceId，再结合 Trace、接口日志、容器和依赖资源指标判断是当前服务异常、下游失败、业务可预期失败、单实例异常还是资源/中间件问题。
+
+样例：
+
+```text
+MetricName: CP_all_all_sevice_running_error_activity
+Category: AIOps@count
+告警对象：服务名称：ams_front,集群信息：cluster2
+告警信息：失败数=2,发生时间=2026-06-22T13:42:00, 日志=DEFAULT prebook loginAppointment failed
+```
+
+### 11A.2 数据采集
+
+默认采集：
+
+1. ERROR 运行日志上下文：按 `serviceName + cluster + level=ERROR + normalizedLogQuery + alarmWindow` 查询，limit 默认使用 `max-runtime-log-size`。
+2. 日志查询尝试记录：记录完整 msg、移除 `DEFAULT` 后的 msg、每次切割后的 msg、命中数量和最终使用的 `matchedLogQuery`。
+3. traceId 样本：从命中运行日志中提取 traceId，按时间接近度、日志相似度、实例分布去重采样。
+4. Trace 链路接口日志：对采样 traceId 查询全链路接口日志。
+5. 关联接口日志：如果 Trace 或运行日志能反推出当前接口，则查询该接口在告警窗口内的成功率、错误码和时延分布；否则该 Provider 标记为 `SKIPPED`。
+6. 容器指标：CPU、内存、GC、实例状态、CSE 使用率。
+7. 资源映射：数据库、DCS、MQ 实例。
+8. 数据库、DCS、MQ 指标：只采集当前服务映射资源在告警窗口内的数据。
+9. 基线数据：同服务同日志签名前一天同时间段 ERROR 次数、常见日志签名和历史分析结果。
+
+### 11A.3 规则预分析
+
+#### 11A.3.1 日志 msg 归一化与切割查询
+
+服务错误日志告警的第一关键证据是“触发告警的 ERROR 日志上下文”。查询前必须先做归一化：
+
+```text
+rawMsg = alert.triggerValues.logMessage
+normalized = trim(rawMsg)
+normalized = removeLeadingTokenIgnoreCase(normalized, "DEFAULT")
+normalized = collapseWhitespace(normalized)
+level = "ERROR"
+```
+
+只移除开头单独出现的 `DEFAULT` token，不能移除 message 中间的业务词。样例 `DEFAULT prebook loginAppointment failed` 的首轮查询词为 `prebook loginAppointment failed`。
+
+查询降级策略：
+
+```text
+queries = [
+    normalized,
+    removeLeadingWords(normalized, 1),
+    removeLeadingWords(normalized, 2),
+    bestContiguousPhrase(normalized, minWords=2),
+    lastMeaningfulWords(normalized, 2)
+]
+
+for query in dedupe(queries):
+    if query length is too short:
+        continue
+    result = RuntimeLogProvider.queryByMessage(serviceName, cluster, "ERROR", query, alarmWindow, limit)
+    record query attempt and hit count
+    if result has hits:
+        matchedLogQuery = query
+        stop
+```
+
+切割原则：
+
+1. 每次查询都必须保留 `level=ERROR`、`serviceName`、`cluster` 和 `alarmWindow` 强过滤条件。
+2. 优先从左侧去掉模块、域名、场景等前缀词，例如 `prebook loginAppointment failed` 可降级为 `loginAppointment failed`。
+3. 最短查询词默认不少于 2 个有意义 token 或 8 个字符，避免只用 `failed` 这类过宽关键词污染证据。
+4. 如果所有切割查询都无命中，进入规则降级结果，不调用 LLM 做无证据推理。
+5. 证据包必须保留 `queryAttempts`，包括 query、level、hitCount 和是否被选为 `matchedLogQuery`；单次 Provider 调用耗时仍记录在 `aiops_provider_call_log.latency_ms`。
+
+#### 11A.3.2 日志上下文聚合
+
+对命中日志统计：
+
+1. 命中总数、按实例分布、按 logger/thread 分布。
+2. traceId 提取成功率和 traceId TopN。
+3. exceptionType、stackTop、errorCode/errorMsg 聚合。
+4. 与告警发生时间的时间距离。
+5. 是否集中在单实例、少量 trace 或少量 uid。
+
+判断：
+
+```text
+if matched logs concentrated on one instance:
+    add finding SINGLE_INSTANCE_ABNORMAL
+
+if exceptionType or stackTop indicates application exception:
+    add finding CURRENT_SERVICE_RUNTIME_EXCEPTION
+
+if message looks like repeated business failure and trace/resources show no system anomaly:
+    add finding REPEATED_BUSINESS_LOG_ERROR
+```
+
+#### 11A.3.3 traceId 关联分析
+
+如果命中日志包含 traceId：
+
+1. 查询 TraceProvider，构建调用树。
+2. 判断首个失败 span 是否在当前服务还是下游。
+3. 如果多个 trace 的首个失败 span 指向同一下游，输出 `DOWNSTREAM_RPC_FAILURE`。
+4. 如果当前服务 span 抛出异常且下游正常，输出 `CURRENT_SERVICE_RUNTIME_EXCEPTION`。
+5. 如果 trace 查询失败或日志无 traceId，不能输出强下游结论，只能在 `missingEvidence` 或 `insufficientEvidence` 中说明。
+
+#### 11A.3.4 资源指标关联
+
+判断条件：
+
+1. 日志集中实例与容器 CPU、内存、GC、实例重启或启动失败重合时，提升 `SINGLE_INSTANCE_ABNORMAL`、`CONTAINER_CPU_PRESSURE`、`CONTAINER_MEMORY_PRESSURE` 或 `GC_PRESSURE`。
+2. 日志 message、exception 或 stackTop 出现 SQL、DAO、DB timeout、connection 等关键词，且数据库指标异常时，提升 `DATABASE_RESOURCE_PRESSURE` 或 `DATABASE_SLOW_QUERY`。
+3. 日志 message、exception 或 stackTop 出现 Redis、DCS、cache timeout 等关键词，且 DCS 指标异常时，提升 `DCS_LATENCY_OR_FAILURE`。
+4. 日志 message、exception 或 stackTop 出现 MQ、topic、consume、produce、broker 等关键词，且 MQ 积压或延迟异常时，提升 `MQ_BACKLOG_OR_LATENCY`。
+
+#### 11A.3.5 失败数与影响范围
+
+`failureCount` 只用于影响范围判断，不作为跳过分析的理由。
+
+```text
+if failureCount <= 3:
+    impact may be limited
+    still analyze log context, trace, metrics and baseline
+```
+
+样例中 `failureCount=2`，结论可以说明“当前触发次数较少，暂不表现为大范围故障”，但不能判定为误报，也不能跳过 traceId 和资源指标分析。
+
+### 11A.4 服务错误日志告警证据摘要
+
+证据包必须包含：
+
+```json
+{
+  "alert": {
+    "category": "SERVICE_ERROR_LOG",
+    "serviceName": "ams_front",
+    "cluster": "cluster2",
+    "occurTime": "2026-06-22T13:42:00+08:00",
+    "failureCount": 2,
+    "logLevel": "ERROR",
+    "logMessage": "DEFAULT prebook loginAppointment failed",
+    "normalizedLogQuery": "prebook loginAppointment failed"
+  },
+  "runtimeLogQuery": {
+    "matched": true,
+    "matchedLogQuery": "loginAppointment failed",
+    "queryAttempts": [
+      {
+        "query": "prebook loginAppointment failed",
+        "level": "ERROR",
+        "hitCount": 0
+      },
+      {
+        "query": "loginAppointment failed",
+        "level": "ERROR",
+        "hitCount": 2
+      }
+    ]
+  },
+  "runtimeLogAggregation": {
+    "totalHits": 2,
+    "traceIdCount": 2,
+    "instanceDistribution": [
+      {
+        "instanceId": "ams-front-1",
+        "count": 2,
+        "share": 1.0
+      }
+    ],
+    "exceptionTypes": ["AppointmentLoginException"],
+    "sampleMessages": ["prebook loginAppointment failed"]
+  },
+  "traceFindings": [
+    {
+      "traceId": "trace_xxx",
+      "firstFailedService": "ams_front",
+      "firstFailedInterface": "loginAppointment",
+      "errorMsg": "prebook loginAppointment failed"
+    }
+  ],
+  "metricAnomalies": [],
+  "ruleFindings": [
+    {
+      "type": "CURRENT_SERVICE_RUNTIME_EXCEPTION",
+      "confidence": 0.68,
+      "evidence": "ERROR logs matched by msg contain traceId and fail in current service span"
+    }
+  ]
+}
+```
+
+### 11A.5 服务错误日志告警输出建议
+
+必须给出：
+
+1. 是否成功通过 msg 查询到 ERROR 运行日志上下文。
+2. 使用的是完整 msg 还是切割后的 `matchedLogQuery`，以及为什么切割。
+3. 是否提取到 traceId，关联 trace 中首个失败点在当前服务还是下游。
+4. 错误是否集中在单实例、少量 trace、少量 uid 或同一异常类型。
+5. 是否存在容器、数据库、DCS、MQ 指标异常。
+6. `failureCount` 是否说明当前影响范围可能有限，但不能作为跳过分析的理由。
+7. 建议优先查看的 traceId、实例、logger、异常类型、资源实例和日志查询词。
+
 ## 12. LLM 告警分析设计
 
 ### 12.1 LLM 定位
@@ -1401,6 +1669,7 @@ public interface PromptBuilder {
 ```text
 RpcErrorRatePromptBuilder
 RpcLatencyPromptBuilder
+ServiceErrorLogPromptBuilder
 ```
 
 ### 12.4 通用 System Prompt
@@ -1418,6 +1687,7 @@ RpcLatencyPromptBuilder
 4. 给出可执行的人工排查建议，但不能建议系统已经自动执行任何动作。
 5. 对错误率告警，需要特别根据 errorMsg 判断是否可能是业务 errorCode 未屏蔽；请求量较小时只能说明影响范围可能有限，不能判定为误报或跳过分析。
 6. 对时延告警，需要特别判断慢点在当前服务、下游 RPC、数据库、DCS、MQ、容器资源还是 GC。
+7. 对服务错误日志告警，需要先判断 msg 是否成功命中 ERROR 运行日志上下文、命中使用的是完整 msg 还是切割后的 msg、是否提取到 traceId，再判断当前服务、下游、资源或业务重复错误。
 
 输出必须是合法 JSON，必须符合给定 schema。
 不要输出 Markdown，不要输出 JSON 之外的任何文本。
@@ -1454,6 +1724,26 @@ RpcLatencyPromptBuilder
 4. 判断数据库、DCS、MQ、容器 CPU、内存、GC、实例状态、CSE 使用率是否与时延升高相关。
 5. 判断请求量突增是否可能导致时延升高。
 6. 给出人工排查建议，但不要执行任何动作。
+
+证据 JSON：
+{{compressedEvidenceJson}}
+
+请严格输出符合 schema 的 JSON。
+```
+
+### 12.6A 服务错误日志告警 User Prompt 模板
+
+```text
+请分析以下服务错误日志告警。
+
+分析重点：
+1. 判断告警 msg 是否成功查询到 ERROR 运行日志上下文。
+2. 如果完整 msg 未命中而使用了切割后的 matchedLogQuery，需要说明切割查询带来的不确定性。
+3. 判断是否提取到 traceId，并根据 trace 判断首个失败点在当前服务还是下游服务。
+4. 判断错误是否集中在单实例、少量 trace、少量 uid、同一 exceptionType 或同一 stackTop。
+5. 判断数据库、DCS、MQ、容器 CPU、内存、GC、实例状态、CSE 使用率是否与错误日志同窗口相关。
+6. failureCount 较小时只能说明当前影响范围可能有限，不能判定为误报或跳过分析。
+7. 给出人工排查建议，包括优先查看的 traceId、实例、logger、exceptionType、matchedLogQuery 和资源实例，但不要执行任何动作。
 
 证据 JSON：
 {{compressedEvidenceJson}}
@@ -1599,9 +1889,10 @@ RpcLatencyPromptBuilder
 4. 慢 trace 最多保留 `max-slow-trace-sample-size` 条，该数量必须配置化。
 5. 每条 trace 只保留关键 span：根 span、最慢 span、失败 span、与告警服务相关 span。
 6. 运行日志最多 50 条，先按 ERROR、WARN 排序，再按 trace 相关性排序。
-7. 每条运行日志 message 最多截断 `runtime-log-message-max-chars` 字符，该长度必须配置化。
-8. 指标只保留告警窗口、基线、异常点、峰值和趋势，不传完整高频时间序列。
-9. 每条证据生成稳定 evidenceId，例如 `metric.container.cpu.max.1`、`trace.slow.3`。
+7. 服务错误日志告警必须保留 `runtimeLogQuery.queryAttempts`、`matchedLogQuery`、命中日志聚合和 traceId 提取结果；查询尝试记录不计入运行日志样本条数上限。
+8. 每条运行日志 message 最多截断 `runtime-log-message-max-chars` 字符，该长度必须配置化。
+9. 指标只保留告警窗口、基线、异常点、峰值和趋势，不传完整高频时间序列。
+10. 每条证据生成稳定 evidenceId，例如 `metric.container.cpu.max.1`、`trace.slow.3`、`runtime.query.attempt.1`。
 
 ### 12.10 LLM 失败降级
 
@@ -1743,7 +2034,34 @@ score < 20  -> confidence = 0.20
 3. 如果容器或 GC 分数最高：说明“当前服务自身资源压力可能导致时延升高”。
 4. 如果所有候选分数都低：说明“规则降级策略未能定位明确根因”，并列出最需要补充的证据。
 
-#### 12.11.7 降级策略优先级
+#### 12.11.7 服务错误日志告警降级规则
+
+服务错误日志告警有两层降级：
+
+1. 日志查询降级：完整 `normalizedLogQuery` 查不到时，按 11A.3.1 对 msg 做切割查询；这仍属于正常证据采集流程，不应直接标记 `DEGRADED_SUCCESS`。
+2. 分析结果降级：所有 `level=ERROR` 的 msg 查询尝试都无命中，或 RuntimeLogProvider 不可用时，才生成 `RULE_BASED_DEGRADED` 结果，主根因为 `UNKNOWN`，并明确说明无法定位触发告警的运行日志上下文。
+
+候选根因和评分建议：
+
+| 根因类型 | 加分条件 |
+| --- | --- |
+| `CURRENT_SERVICE_RUNTIME_EXCEPTION` | ERROR 日志命中且 exceptionType/stackTop 指向当前服务异常加 30；trace 首个失败 span 在当前服务加 30；下游 trace 正常加 15 |
+| `DOWNSTREAM_RPC_FAILURE` | 命中日志提取到多个 traceId 加 10；多个 trace 首个失败 span 指向同一下游加 35；下游 span success=false 加 25；下游日志存在 ERROR 加 15 |
+| `REPEATED_BUSINESS_LOG_ERROR` | matchedLogQuery 命中的日志 message 呈业务动作失败语义加 20；failureCount 低加 10；trace 和资源指标无异常加 20；历史基线中同日志签名长期存在加 20 |
+| `SINGLE_INSTANCE_ABNORMAL` | 命中 ERROR 日志集中在单实例加 30；该实例 CPU/内存/GC/重启异常加 25；其它实例无同类日志加 15 |
+| `DATABASE_RESOURCE_PRESSURE` | ERROR 日志或 stackTop 出现 SQL/DB/connection 关键词加 20；DB CPU/连接数/锁等待/慢日志异常加 25；trace 中 DB 相关 span 失败加 20 |
+| `DCS_LATENCY_OR_FAILURE` | ERROR 日志或 stackTop 出现 Redis/DCS/cache timeout 关键词加 20；DCS P99/平均时延/客户端失败异常加 25；trace 中缓存相关 span 失败加 20 |
+| `MQ_BACKLOG_OR_LATENCY` | ERROR 日志或 stackTop 出现 MQ/topic/consume/produce/broker 关键词加 20；MQ 积压或消费延迟异常加 25；trace 或日志显示消息处理失败加 20 |
+
+服务错误日志降级 summary 生成规则：
+
+1. 如果所有 msg 查询都无命中：说明“未能根据告警 msg 定位 ERROR 运行日志上下文”，列出尝试过的查询词和下一步建议。
+2. 如果命中日志但没有 traceId：说明“已命中 ERROR 日志，但缺少 traceId，无法强判断下游链路”，优先基于实例、异常类型和资源指标给出低置信结论。
+3. 如果当前服务异常分数最高：说明“错误日志与当前服务异常栈或当前服务失败 span 相关”。
+4. 如果下游失败分数最高：说明“错误日志对应 trace 的首个失败点疑似在下游服务”。
+5. 如果业务重复错误分数最高：说明“当前更像重复业务动作失败或可预期业务失败日志”，但必须注明这是基于日志语义和无资源/trace 异常的综合判断。
+
+#### 12.11.8 降级策略优先级
 
 当多个根因同时满足时，按以下优先级修正排序：
 
@@ -1751,9 +2069,10 @@ score < 20  -> confidence = 0.20
 2. 与告警时间窗口重合的资源异常优先于非重合异常。
 3. 多个 trace 共同指向同一服务/接口优先于单条 trace 证据。
 4. 错误率告警中，业务 errorCode 未屏蔽优先于请求量影响范围判断。
-5. 请求量较小只影响 impact 判断，不应覆盖真实根因判断。
+5. 服务错误日志告警中，完整 msg 命中优先于切割 msg 命中；切割 msg 命中的结论需要降低置信度并说明不确定性。
+6. 请求量或失败数较小只影响 impact 判断，不应覆盖真实根因判断。
 
-#### 12.11.8 降级策略建议生成
+#### 12.11.9 降级策略建议生成
 
 规则降级策略必须生成 recommendations：
 
@@ -1762,7 +2081,7 @@ score < 20  -> confidence = 0.20
 3. 如果结论不确定，建议优先补充证据，而不是输出笼统“人工排查”。
 4. 所有建议均为人工动作，不执行自动处置。
 
-#### 12.11.9 降级策略版本化
+#### 12.11.10 降级策略版本化
 
 规则降级策略需要版本化，便于回放评估和线上问题复盘：
 
@@ -1814,7 +2133,7 @@ CREATE TABLE aiops_analysis_task (
     task_id VARCHAR(128) NOT NULL COMMENT '分析任务ID',
     alert_id VARCHAR(128) NOT NULL COMMENT '关联告警ID',
     category VARCHAR(64) NOT NULL COMMENT '告警类型',
-    dedupe_key VARCHAR(1024) NOT NULL COMMENT '去重键：category|serviceName|interfaceName|cluster',
+    dedupe_key VARCHAR(1024) NOT NULL COMMENT '去重键：接口类为category|serviceName|interfaceName|cluster，服务错误日志为category|serviceName|cluster|logSignature',
     task_status VARCHAR(64) NOT NULL COMMENT 'AnalysisJobStatus状态机状态',
     current_step VARCHAR(128) COMMENT '当前执行步骤，例如 collect_provider.metric',
     status_reason TEXT COMMENT '当前状态说明，记录等待、降级或失败原因',
@@ -2007,7 +2326,7 @@ Webhook 同步接入阶段先完成告警解析、分类、保存 `aiops_alert_e
 | 1 | `PENDING` | 异步执行器领取任务，初始化执行上下文 | `RUNNING` | `FAILED` |
 | 2 | `RUNNING` | 初始化 AnalysisContext，选择策略 | `COLLECTING_EVIDENCE` | `FAILED` |
 | 3 | `COLLECTING_EVIDENCE` | 并行调用 Provider，收集指标、日志、Trace、基线、资源映射 | `RULE_ANALYZING` | Provider 失败按 8.0 的默认口径处理；能生成降级结果时进入后续状态，不能解析告警关键字段才 `FAILED` |
-| 4 | `RULE_ANALYZING` | 执行错误率/时延规则预分析 | `COMPRESSING_EVIDENCE` | `FAILED` |
+| 4 | `RULE_ANALYZING` | 执行错误率、时延或服务错误日志规则预分析 | `COMPRESSING_EVIDENCE` | `FAILED` |
 | 5 | `COMPRESSING_EVIDENCE` | 生成压缩证据包并保存 evidence bundle | LLM 启用时进入 `LLM_ANALYZING`，LLM 关闭时进入 `GENERATING_RESULT` 并生成 `RULE_BASED_ONLY` 结果 | `FAILED` |
 | 6 | `LLM_ANALYZING` | 调用 LLM，校验 JSON 和 evidenceId | `GENERATING_RESULT` | `RULE_FALLBACK_ANALYZING` |
 | 7 | `RULE_FALLBACK_ANALYZING` | 执行规则降级策略 | `GENERATING_RESULT` | `FAILED` |
@@ -2118,6 +2437,18 @@ aiops:
     # 每条运行日志 message 最大字符数，超出后截断再送入 LLM。
     runtime-log-message-max-chars: 500
 
+    # 服务错误日志告警按 msg 查询运行日志时，切割查询最多尝试次数。
+    error-log-message-query-max-attempts: 5
+
+    # 服务错误日志告警 msg 切割后的最短查询字符数，避免只用 failed/error 等泛词扩大误命中。
+    error-log-message-query-min-chars: 8
+
+    # 服务错误日志告警 msg 切割后的最少有效 token 数。
+    error-log-message-query-min-tokens: 2
+
+    # 服务错误日志告警查询运行日志时固定使用的日志级别。
+    error-log-query-level: ERROR
+
     # errorCode 聚合 TopN 上限。
     max-error-code-size: 10
 
@@ -2194,18 +2525,20 @@ aiops:
 
 必须覆盖：
 
-1. 告警文本解析：错误率样例、时延样例、字段缺失样例。
+1. 告警文本解析：错误率样例、时延样例、服务错误日志样例、字段缺失样例。
 2. 告警分类规则。
 3. dedupeKey 生成和 5 分钟去重。
 4. errorCode 聚合和请求量影响范围判断。
 5. 时延分布统计和慢 trace 聚合。
 6. spanId/parentSpanId 构建调用树。
-7. 指标异常检测。
-8. LLM 输出 Schema 校验。
-9. LLM evidenceId 引用校验。
-10. RuleBasedFallbackAnalyzer 在 LLM 不可用时生成同构结果，并标注 `analysisMode=RULE_BASED_DEGRADED`。
-11. AnalysisJob 状态机合法流转和非法流转拦截。
-12. ProviderResult 聚合、并行调用和非关键 Provider 失败降级。
+7. 服务错误日志 msg 归一化：开头 `DEFAULT` 被移除，中间业务词不被误删。
+8. 服务错误日志查询切割：完整 msg 无命中时生成更短查询词，且每次查询都固定 `level=ERROR`。
+9. 指标异常检测。
+10. LLM 输出 Schema 校验。
+11. LLM evidenceId 引用校验。
+12. RuleBasedFallbackAnalyzer 在 LLM 不可用时生成同构结果，并标注 `analysisMode=RULE_BASED_DEGRADED`。
+13. AnalysisJob 状态机合法流转和非法流转拦截。
+14. ProviderResult 聚合、并行调用和非关键 Provider 失败降级。
 
 ### 17.2 集成测试
 
@@ -2217,22 +2550,27 @@ aiops:
 4. RPC 时延下游慢。
 5. RPC 时延数据库慢 SQL。
 6. RPC 时延 DCS P99 升高。
-7. LLM 超时降级，并返回规则降级策略生成的根因、建议和降级标记。
-8. Provider 部分失败仍能输出缺失证据说明。
-9. 5 分钟外同 dedupeKey 历史结果能作为 historicalReference 返回。
-10. ResourceMappingProvider 能从预置数据库表读取 DB/DCS/MQ 映射。
+7. 服务错误日志完整 msg 命中后提取 traceId，并根据 trace 定位当前服务或下游失败。
+8. 服务错误日志完整 msg 无命中时，移除 `DEFAULT` 后按切割 msg 查询命中，证据包保留 queryAttempts 和 matchedLogQuery。
+9. 服务错误日志所有 msg 查询都无命中时，返回规则降级结果并说明无法定位 ERROR 运行日志上下文。
+10. LLM 超时降级，并返回规则降级策略生成的根因、建议和降级标记。
+11. Provider 部分失败仍能输出缺失证据说明。
+12. 5 分钟外同 dedupeKey 历史结果能作为 historicalReference 返回。
+13. ResourceMappingProvider 能从预置数据库表读取 DB/DCS/MQ 映射。
 
 ### 17.3 验收标准
 
-1. Webhook 接口能接收两个样例告警并创建任务。
+1. Webhook 接口能接收错误率、时延和服务错误日志三个样例告警并创建任务。
 2. 错误率样例能解析出 `ams_front`、`vmall-ams.PrizeActivityService.queryPrizeResult`、`cluster1`、`AIOps@rate`。
 3. 时延样例能解析出 `vmall_ingresscache_ica`、接口名、`cluster2`、`AIOps@delay`。
-4. 相同 dedupeKey 5 分钟内只创建一个分析任务。
-5. 相同 dedupeKey 5 分钟外的历史结果能返回 alertId、taskId 和摘要，且不阻止本次分析。
-6. LLM 失败时仍能返回规则降级分析结果，且 `analysisMode=RULE_BASED_DEGRADED`、`degraded=true`、`llmUsed=false`。
-7. 非关键 Provider 失败时能返回 `missingEvidence` 和 `degradedByProviderFailure=true`。
-8. 所有最终结论都有 evidenceId。
-9. 不存在自动执行处置动作的代码路径。
+4. 服务错误日志样例能解析出 `ams_front`、`cluster2`、`AIOps@count`、`failureCount=2`、`logMessage=DEFAULT prebook loginAppointment failed` 和 `normalizedLogQuery=prebook loginAppointment failed`。
+5. 服务错误日志查询 RuntimeLogProvider 时必须带 `level=ERROR`；完整 msg 无命中时会继续使用切割后的 msg 查询。
+6. 相同 dedupeKey 5 分钟内只创建一个分析任务。
+7. 相同 dedupeKey 5 分钟外的历史结果能返回 alertId、taskId 和摘要，且不阻止本次分析。
+8. LLM 失败时仍能返回规则降级分析结果，且 `analysisMode=RULE_BASED_DEGRADED`、`degraded=true`、`llmUsed=false`。
+9. 非关键 Provider 失败时能返回 `missingEvidence` 和 `degradedByProviderFailure=true`。
+10. 所有最终结论都有 evidenceId。
+11. 不存在自动执行处置动作的代码路径。
 
 ## 18. 开发任务拆分
 
@@ -2512,4 +2850,31 @@ Tenant: 电商
 Application: 电商业务
 Service: VmallOpenGWService
 Site: cn_product_default
+```
+
+### 21.3 服务错误日志告警原文
+
+```text
+WiseEye Alarm:
+Status: OPEN
+Severity: Major
+Host: CP_all_all_sevice_running_error_activity:{"servicename":"ams_front","cluster":"cluster2"}
+Category: AIOps@count
+Details: CP_all_all_sevice_running_error_activity
+1、告警名称：CP域服务业务错误日志告警
+2、告警对象：服务名称：ams_front,集群信息：cluster2
+3、告警信息：失败数=2,发生时间=2026-06-22T13:42:00, 日志=DEFAULT prebook loginAppointment failed
+4、看板跳转：https://console-drcn.wisedevops.huawei.com/microApp/serviceInsight/aiops5Dashboard#/edit-dashboard?id=9dabb7e8-db11-417a-ade0-a988ad4df9e8
+AlertName: CP域服务业务错误日志告警,Site: cn_product_default,MetricName: CP_all_all_sevice_running_error_activity,Category: AIOps@count
+IP Address: null
+Occur Time: 2026-06-22 13:42:30+08:00
+Clear Time: null
+Template: unknown
+Handler: unknown
+Alert ID: 554631819
+Tenant: 电商
+Application: 电商业务
+Service: VmallActivityService
+Site: cn_product_default
+Source_ID: 5ba509babfa344978b9176d1b6602581
 ```

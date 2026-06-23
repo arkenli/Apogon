@@ -20,6 +20,9 @@ public class DefaultAlertClassifier implements AlertClassifier {
         if ("AIOps@delay".equals(alert.rawCategory())) {
             return AlertCategory.RPC_LATENCY;
         }
+        if ("AIOps@count".equals(alert.rawCategory()) && isServiceErrorLogAlert(alert)) {
+            return AlertCategory.SERVICE_ERROR_LOG;
+        }
 
         String metricName = alert.metricName();
         if (metricName == null || metricName.isBlank()) {
@@ -39,5 +42,19 @@ public class DefaultAlertClassifier implements AlertClassifier {
             return AlertCategory.RPC_LATENCY;
         }
         return AlertCategory.UNKNOWN;
+    }
+
+    private boolean isServiceErrorLogAlert(AlertEvent alert) {
+        String signal = (nullToEmpty(alert.metricName()) + " " + nullToEmpty(alert.alertName()))
+                .toLowerCase(Locale.ROOT);
+        return signal.contains("sevice_running_error")
+                || signal.contains("service_running_error")
+                || signal.contains("running_error")
+                || signal.contains("error_activity")
+                || signal.contains("错误日志");
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 }

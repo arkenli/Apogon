@@ -86,6 +86,7 @@ public class MockLlmClient implements LlmClient {
         return switch (category) {
             case RPC_ERROR_RATE -> buildErrorRateJson(compressedEvidence);
             case RPC_LATENCY -> buildLatencyJson(compressedEvidence);
+            case SERVICE_ERROR_LOG -> buildServiceErrorLogJson(compressedEvidence);
             case UNKNOWN -> buildErrorRateJson(compressedEvidence);
         };
     }
@@ -166,6 +167,42 @@ public class MockLlmClient implements LlmClient {
         ));
 
         root.put("overallConfidence", compressedEvidence.missingEvidence().isEmpty() ? 0.76 : 0.71);
+        root.set("insufficientEvidence", insufficientEvidence(compressedEvidence));
+        return writeJson(root);
+    }
+
+    private String buildServiceErrorLogJson(CompressedEvidenceBundle compressedEvidence) {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("summary", "Matched service ERROR runtime logs point to a current-service runtime exception.");
+        root.set("impact", impact(
+                "LOW",
+                "failureCount is limited in the current window, but the matched ERROR log still needs confirmation."
+        ));
+
+        ArrayNode rootCauses = root.putArray("rootCauses");
+        rootCauses.add(rootCause(
+                "CURRENT_SERVICE_RUNTIME_EXCEPTION",
+                "Matched ERROR runtime log and trace evidence point to the alerting service.",
+                0.72,
+                evidenceIds(compressedEvidence, List.of("runtime.log.1", "runtime.query.attempt.1"), 2),
+                "The selected matchedLogQuery located ERROR runtime log context and traceId evidence is available."
+        ));
+
+        ArrayNode recommendations = root.putArray("recommendations");
+        recommendations.add(recommendation(
+                "P1",
+                "CHECK_LOG",
+                "Inspect the matched ERROR runtime log context, exceptionType, and stackTop.",
+                firstExistingEvidenceId(compressedEvidence, "runtime.query.attempt.1")
+        ));
+        recommendations.add(recommendation(
+                "P1",
+                "CHECK_TRACE",
+                "Inspect the traceId extracted from the matched runtime log.",
+                firstExistingEvidenceId(compressedEvidence, "trace.failure.1")
+        ));
+
+        root.put("overallConfidence", compressedEvidence.missingEvidence().isEmpty() ? 0.72 : 0.66);
         root.set("insufficientEvidence", insufficientEvidence(compressedEvidence));
         return writeJson(root);
     }
@@ -264,7 +301,7 @@ public class MockLlmClient implements LlmClient {
     private CompressedEvidenceBundle extractEvidence(LlmRequest request) {
         String prompt = request.messages().stream()
                 .map(LlmMessage::content)
-                .filter(content -> content.contains("证据 JSON："))
+                .filter(this::containsEvidenceJsonMarker)
                 .reduce((first, second) -> second)
                 .orElseThrow(() -> new LlmClientException(LlmCallStatus.FAILED, "mock llm request does not contain prompt content"));
         int jsonStart = prompt.indexOf('{');
@@ -281,6 +318,11 @@ public class MockLlmClient implements LlmClient {
 
     private boolean containsToken(String serviceName, String token) {
         return serviceName != null && serviceName.toLowerCase(Locale.ROOT).contains(token);
+    }
+
+    private boolean containsEvidenceJsonMarker(String content) {
+        return content.contains("证据 JSON：")
+                || content.contains("Evidence JSON:");
     }
 
     private String writeJson(ObjectNode root) {

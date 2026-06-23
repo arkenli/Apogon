@@ -117,21 +117,50 @@ public class AlertIngestionService {
         );
     }
 
-    private void validateAlert(AlertEvent alert) {
+    static void validateAlert(AlertEvent alert) {
         if (alert.alertId() == null) {
             throw new AiopsException(ErrorCode.BAD_REQUEST, "Missing Alert ID");
         }
-        if (alert.category() == AlertCategory.UNKNOWN) {
+        if (alert.category() == null || alert.category() == AlertCategory.UNKNOWN) {
             throw new AiopsException(ErrorCode.BAD_REQUEST, "Unsupported alert category");
         }
-        if (alert.serviceName() == null || alert.interfaceName() == null || alert.cluster() == null) {
+        switch (alert.category()) {
+            case RPC_ERROR_RATE, RPC_LATENCY -> validateRpcAlert(alert);
+            case SERVICE_ERROR_LOG -> validateServiceErrorLogAlert(alert);
+            case UNKNOWN -> throw new AiopsException(ErrorCode.BAD_REQUEST, "Unsupported alert category");
+        }
+        if (alert.metricOccurTime() == null) {
+            throw new AiopsException(ErrorCode.BAD_REQUEST, "Missing metric occurrence time");
+        }
+    }
+
+    private static void validateRpcAlert(AlertEvent alert) {
+        if (!hasText(alert.serviceName()) || !hasText(alert.interfaceName()) || !hasText(alert.cluster())) {
             throw new AiopsException(
                     ErrorCode.BAD_REQUEST,
                     "Alert must contain serviceName, interfaceName, and cluster"
             );
         }
-        if (alert.metricOccurTime() == null) {
-            throw new AiopsException(ErrorCode.BAD_REQUEST, "Missing metric occurrence time");
+    }
+
+    private static void validateServiceErrorLogAlert(AlertEvent alert) {
+        if (!hasText(alert.serviceName()) || !hasText(alert.cluster())) {
+            throw new AiopsException(
+                    ErrorCode.BAD_REQUEST,
+                    "Service error log alert must contain serviceName and cluster"
+            );
         }
+        if (alert.triggerValues() == null
+                || (!hasText(alert.triggerValues().normalizedLogQuery())
+                && !hasText(alert.triggerValues().logMessage()))) {
+            throw new AiopsException(
+                    ErrorCode.BAD_REQUEST,
+                    "Service error log alert must contain log query text"
+            );
+        }
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 }

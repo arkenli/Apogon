@@ -9,6 +9,10 @@ public record AlertTriggerValues(
         Long avgLatencyMs,
         Long p99LatencyMs,
         Long maxLatencyMs,
+        Double failureCount,
+        String logLevel,
+        String logMessage,
+        String normalizedLogQuery,
         String thresholdExpression,
         String rawMetricValueText
 ) {

@@ -21,6 +21,7 @@ import com.company.aiops.analysis.rule.model.RuleAnalysisEvidence;
 import com.company.aiops.analysis.rule.model.RuleFinding;
 import com.company.aiops.analysis.rule.model.TraceObservation;
 import com.company.aiops.analysis.rule.model.UidAggregate;
+import com.company.aiops.analysis.rule.RuleAnalysisTestFixtures;
 import com.company.aiops.provider.model.ContainerMetrics;
 import com.company.aiops.provider.model.CseMetrics;
 import com.company.aiops.provider.model.DatabaseMetrics;
@@ -61,20 +62,20 @@ class DefaultEvidenceCompressorTests {
                 "raw",
                 Instant.parse("2026-04-21T02:33:00Z"),
                 Instant.parse("2026-04-21T02:33:00Z"),
-                new AlertTriggerValues(12.0, 0.75, null, null, null, "demo", "raw")
+                new AlertTriggerValues(12.0, 0.75, null, null, null, null, null, null, null, "demo", "raw")
         );
         ProviderCollectionResult collection = collection(
                 alert,
-                new AnalysisOptions(2000, 2, 1, 2, 10, 2, 1, false, true),
+                new AnalysisOptions(2000, 2, 1, 2, 10, 2, 1, 5, 8, 2, "ERROR", false, true),
                 List.of(
                         new InterfaceLogEntry("demo-service", "demo.Interface.query", "trace-1", "1", null, "uid-alpha", false, "E1", "first", 120L, Instant.parse("2026-04-21T02:31:00Z")),
                         new InterfaceLogEntry("demo-service", "demo.Interface.query", "trace-2", "2", null, "uid-bravo", false, "E2", "second", 240L, Instant.parse("2026-04-21T02:31:10Z")),
                         new InterfaceLogEntry("demo-service", "demo.Interface.query", "trace-3", "3", null, "uid-charlie", true, null, null, 360L, Instant.parse("2026-04-21T02:31:20Z"))
                 ),
                 List.of(
-                        new RuntimeLogEntry("demo-service", "trace-3", "WARN", "1234567890-ABCDEFGHIJ", Instant.parse("2026-04-21T02:31:22Z")),
-                        new RuntimeLogEntry("demo-service", "trace-2", "ERROR", "ABCDEFGHIJ-1234567890", Instant.parse("2026-04-21T02:31:21Z")),
-                        new RuntimeLogEntry("demo-service", "trace-1", "WARN", "short", Instant.parse("2026-04-21T02:31:20Z"))
+                        runtimeLogEntry("demo-service", "trace-3", "WARN", "1234567890-ABCDEFGHIJ", Instant.parse("2026-04-21T02:31:22Z")),
+                        runtimeLogEntry("demo-service", "trace-2", "ERROR", "ABCDEFGHIJ-1234567890", Instant.parse("2026-04-21T02:31:21Z")),
+                        runtimeLogEntry("demo-service", "trace-1", "WARN", "short", Instant.parse("2026-04-21T02:31:20Z"))
                 ),
                 List.of(new MissingEvidence("runtimeLog", "timeout", false, "runtime details weakened"))
         );
@@ -175,11 +176,11 @@ class DefaultEvidenceCompressorTests {
                 "raw",
                 Instant.parse("2026-04-22T10:00:00Z"),
                 Instant.parse("2026-04-22T10:00:00Z"),
-                new AlertTriggerValues(20.0, null, 3200L, 6400L, null, "demo", "raw")
+                new AlertTriggerValues(20.0, null, 3200L, 6400L, null, null, null, null, null, "demo", "raw")
         );
         ProviderCollectionResult collection = collection(
                 alert,
-                new AnalysisOptions(2000, 10, 1, 3, 50, 5, 5, false, true),
+                new AnalysisOptions(2000, 10, 1, 3, 50, 5, 5, 5, 8, 2, "ERROR", false, true),
                 List.of(
                         new InterfaceLogEntry("demo-service", "demo.Interface.slow", "trace-a", "1", null, "uid-a", true, null, null, 1800L, Instant.parse("2026-04-22T09:59:00Z")),
                         new InterfaceLogEntry("demo-service", "demo.Interface.slow", "trace-b", "2", null, "uid-b", true, null, null, 3600L, Instant.parse("2026-04-22T09:59:10Z"))
@@ -213,6 +214,146 @@ class DefaultEvidenceCompressorTests {
                 .filteredOn(reference -> reference.evidenceId().equals("trace.slow.3"))
                 .singleElement()
                 .satisfies(reference -> assertThat(reference.evidenceType()).isEqualTo("RULE_REFERENCE"));
+    }
+
+    @Test
+    void compressPreservesServiceErrorLogQueryAttemptsAndAlertValues() {
+        AlertEvent alert = RuleAnalysisTestFixtures.serviceErrorLogAlert();
+        ProviderCollectionResult collection = RuleAnalysisTestFixtures.collection(
+                alert,
+                BaselineEvidence.available(InterfaceBaseline.empty()),
+                InterfaceLogEvidence.available(List.of(), List.of()),
+                TraceEvidence.available(List.of()),
+                RuntimeLogEvidence.availableMessageQuery(
+                        List.of(runtimeLogEntry(
+                                "ams_front",
+                                "trace-log-1",
+                                "ERROR",
+                                "DEFAULT prebook loginAppointment failed",
+                                Instant.parse("2026-04-22T03:14:30Z")
+                        )),
+                        "loginAppointment failed",
+                        List.of(
+                                new RuntimeLogEvidence.QueryAttempt(
+                                        "runtime.query.attempt.1",
+                                        "prebook loginAppointment failed",
+                                        "ERROR",
+                                        0,
+                                        false
+                                ),
+                                new RuntimeLogEvidence.QueryAttempt(
+                                        "runtime.query.attempt.2",
+                                        "loginAppointment failed",
+                                        "ERROR",
+                                        1,
+                                        true
+                                )
+                        ),
+                        List.of("trace-log-1")
+                ),
+                MetricEvidence.available(
+                        ContainerMetrics.empty(),
+                        CseMetrics.empty(),
+                        DatabaseMetrics.empty(),
+                        DcsMetrics.empty(),
+                        MqMetrics.empty(),
+                        null
+                )
+        );
+        RuleAnalysisEvidence ruleAnalysis = new RuleAnalysisEvidence(
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(new CandidateRootCause(
+                        "CURRENT_SERVICE_RUNTIME_EXCEPTION",
+                        90,
+                        0.90,
+                        List.of("runtime.log.1", "runtime.query.attempt.2"),
+                        "current service runtime exception"
+                )),
+                List.of(new EvidenceReference("runtime.log.1", "RUNTIME_LOG", "matched runtime log")),
+                List.of()
+        );
+
+        CompressedEvidenceBundle bundle = compressor.compress(collection, ruleAnalysis);
+
+        assertThat(bundle.alert().failureCount()).isEqualTo(2.0);
+        assertThat(bundle.alert().logLevel()).isEqualTo("ERROR");
+        assertThat(bundle.alert().logMessage()).isEqualTo("DEFAULT prebook loginAppointment failed");
+        assertThat(bundle.alert().normalizedLogQuery()).isEqualTo("prebook loginAppointment failed");
+        assertThat(bundle.runtimeLogs().messageQueryMatched()).isTrue();
+        assertThat(bundle.runtimeLogs().matchedLogQuery()).isEqualTo("loginAppointment failed");
+        assertThat(bundle.runtimeLogs().queryAttempts())
+                .extracting(CompressedEvidenceBundle.RuntimeLogQueryAttempt::evidenceId)
+                .containsExactly("runtime.query.attempt.1", "runtime.query.attempt.2");
+        assertThat(bundle.runtimeLogs().sampledTraceIds()).containsExactly("trace-log-1");
+        assertThat(bundle.evidenceRefs())
+                .extracting(EvidenceReference::evidenceId)
+                .contains(
+                        "runtime.query.attempt.1",
+                        "runtime.query.attempt.2",
+                        "runtime.log.1",
+                        "alert.failure.count",
+                        "alert.log.level",
+                        "alert.log.message",
+                        "alert.log.normalized_query"
+                );
+    }
+
+    @Test
+    void compressSkipsNullRuntimeLogSamplesAndQueryAttempts() {
+        AlertEvent alert = RuleAnalysisTestFixtures.serviceErrorLogAlert();
+        List<RuntimeLogEntry> runtimeLogs = new java.util.ArrayList<>();
+        runtimeLogs.add(null);
+        runtimeLogs.add(runtimeLogEntry(
+                "ams_front",
+                "trace-log-1",
+                "ERROR",
+                "DEFAULT prebook loginAppointment failed",
+                Instant.parse("2026-04-22T03:14:30Z")
+        ));
+        List<RuntimeLogEvidence.QueryAttempt> queryAttempts = new java.util.ArrayList<>();
+        queryAttempts.add(null);
+        queryAttempts.add(new RuntimeLogEvidence.QueryAttempt(
+                "runtime.query.attempt.1",
+                "loginAppointment failed",
+                "ERROR",
+                1,
+                true
+        ));
+
+        ProviderCollectionResult collection = RuleAnalysisTestFixtures.collection(
+                alert,
+                BaselineEvidence.available(InterfaceBaseline.empty()),
+                InterfaceLogEvidence.available(List.of(), List.of()),
+                TraceEvidence.available(List.of()),
+                RuntimeLogEvidence.availableMessageQuery(
+                        runtimeLogs,
+                        "loginAppointment failed",
+                        queryAttempts,
+                        List.of("trace-log-1")
+                ),
+                MetricEvidence.available(
+                        ContainerMetrics.empty(),
+                        CseMetrics.empty(),
+                        DatabaseMetrics.empty(),
+                        DcsMetrics.empty(),
+                        MqMetrics.empty(),
+                        null
+                )
+        );
+
+        CompressedEvidenceBundle bundle = compressor.compress(collection, RuleAnalysisEvidence.empty());
+
+        assertThat(bundle.runtimeLogs().samples())
+                .extracting(CompressedEvidenceBundle.RuntimeLogSample::evidenceId)
+                .containsExactly("runtime.log.1");
+        assertThat(bundle.runtimeLogs().queryAttempts())
+                .extracting(CompressedEvidenceBundle.RuntimeLogQueryAttempt::evidenceId)
+                .containsExactly("runtime.query.attempt.1");
     }
 
     private ProviderCollectionResult collection(
@@ -249,6 +390,29 @@ class DefaultEvidenceCompressorTests {
                 false,
                 null,
                 List.of()
+        );
+    }
+
+    private RuntimeLogEntry runtimeLogEntry(
+            String serviceName,
+            String traceId,
+            String level,
+            String message,
+            Instant timestamp
+    ) {
+        return new RuntimeLogEntry(
+                serviceName,
+                null,
+                null,
+                traceId,
+                null,
+                level,
+                null,
+                null,
+                message,
+                null,
+                null,
+                timestamp
         );
     }
 }

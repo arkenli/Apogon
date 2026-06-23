@@ -28,6 +28,10 @@ class ApplicationSmokeTests extends AbstractAiopsIntegrationTestSupport {
     void contextLoadsWithExpectedDefaults() {
         assertThat(aiopsProperties.analysis().dedupeWindow()).isEqualTo(Duration.ofMinutes(5));
         assertThat(aiopsProperties.analysis().historyQueryMaxLimit()).isEqualTo(5);
+        assertThat(aiopsProperties.analysis().errorLogMessageQueryMaxAttempts()).isEqualTo(5);
+        assertThat(aiopsProperties.analysis().errorLogMessageQueryMinChars()).isEqualTo(8);
+        assertThat(aiopsProperties.analysis().errorLogMessageQueryMinTokens()).isEqualTo(2);
+        assertThat(aiopsProperties.analysis().errorLogQueryLevel()).isEqualTo("ERROR");
         assertThat(aiopsProperties.llm().enabled()).isTrue();
         assertThat(aiopsProperties.llm().provider()).isEqualTo("openai-compatible");
         assertThat(aiopsProperties.llm().model()).isEqualTo("MiniMax-M2.7");
@@ -59,6 +63,10 @@ class ApplicationSmokeTests extends AbstractAiopsIntegrationTestSupport {
                 49.0,
                 1.0,
                 3067L,
+                null,
+                null,
+                null,
+                null,
                 null,
                 null,
                 "avg_latency > 3000ms for 5m",
@@ -104,6 +112,10 @@ class ApplicationSmokeTests extends AbstractAiopsIntegrationTestSupport {
         AlertTriggerValues triggerValues = new AlertTriggerValues(
                 3.0,
                 1.0,
+                null,
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,

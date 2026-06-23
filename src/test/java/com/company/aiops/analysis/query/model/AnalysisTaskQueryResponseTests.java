@@ -123,6 +123,33 @@ class AnalysisTaskQueryResponseTests {
     }
 
     @Test
+    void toChineseResultTextDescribesServiceErrorLogCategory() {
+        AnalysisTaskQueryResponse response = new AnalysisTaskQueryResponse(
+                "task-service-log",
+                "alert-service-log",
+                AnalysisJobStatus.SUCCESS,
+                AlertCategory.SERVICE_ERROR_LOG,
+                "ams_front",
+                null,
+                "cluster2",
+                Instant.parse("2026-06-22T05:42:00Z"),
+                Instant.parse("2026-06-22T05:42:01Z"),
+                Instant.parse("2026-06-22T05:42:30Z"),
+                "analysis.complete",
+                "completed",
+                null,
+                null
+        );
+
+        String text = response.toChineseResultText();
+
+        assertThat(text)
+                .contains("告警类型：服务错误日志")
+                .contains("服务：ams_front")
+                .doesNotContain("未知类型");
+    }
+
+    @Test
     void toChineseResultTextDescribesFailedTask() {
         AnalysisTaskQueryResponse response = new AnalysisTaskQueryResponse(
                 "task-failed",

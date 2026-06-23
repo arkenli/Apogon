@@ -2,8 +2,10 @@ package com.company.aiops.analysis.bundle;
 
 import com.company.aiops.alert.model.AlertCategory;
 import com.company.aiops.alert.model.AlertEvent;
+import com.company.aiops.alert.model.AlertTriggerValues;
 import com.company.aiops.analysis.context.AnalysisOptions;
 import com.company.aiops.analysis.evidence.ProviderCollectionResult;
+import com.company.aiops.analysis.evidence.RuntimeLogEvidence;
 import com.company.aiops.analysis.result.EvidenceReference;
 import com.company.aiops.analysis.rule.model.CandidateRootCause;
 import com.company.aiops.analysis.rule.model.DownstreamObservation;
@@ -41,6 +43,10 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
     private static final String ALERT_FAIL_RATE_EVIDENCE_ID = "alert.fail.rate";
     private static final String ALERT_AVG_LATENCY_EVIDENCE_ID = "alert.avg.latency";
     private static final String ALERT_P99_LATENCY_EVIDENCE_ID = "alert.p99.latency";
+    private static final String ALERT_FAILURE_COUNT_EVIDENCE_ID = "alert.failure.count";
+    private static final String ALERT_LOG_LEVEL_EVIDENCE_ID = "alert.log.level";
+    private static final String ALERT_LOG_MESSAGE_EVIDENCE_ID = "alert.log.message";
+    private static final String ALERT_NORMALIZED_LOG_QUERY_EVIDENCE_ID = "alert.log.normalized_query";
     private static final String BASELINE_REQUEST_COUNT_EVIDENCE_ID = "baseline.request.count";
     private static final String BASELINE_FAIL_RATE_EVIDENCE_ID = "baseline.fail.rate";
     private static final String BASELINE_AVG_LATENCY_EVIDENCE_ID = "baseline.avg.latency";
@@ -116,7 +122,11 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
         CompressedEvidenceBundle.RuntimeLogSnapshot runtimeLogSnapshot = new CompressedEvidenceBundle.RuntimeLogSnapshot(
                 collection.runtimeLogEvidence().collected(),
                 collection.runtimeLogEvidence().missingReason(),
-                runtimeLogs
+                runtimeLogs,
+                collection.runtimeLogEvidence().messageQueryMatched(),
+                collection.runtimeLogEvidence().matchedLogQuery(),
+                runtimeLogQueryAttempts(collection.runtimeLogEvidence().queryAttempts()),
+                collection.runtimeLogEvidence().sampledTraceIds()
         );
         CompressedEvidenceBundle.MetricSnapshot metricSnapshot = new CompressedEvidenceBundle.MetricSnapshot(
                 collection.metricEvidence().collected(),
@@ -145,6 +155,7 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
         List<EvidenceReference> evidenceRefs = buildEvidenceReferences(
                 ruleAnalysis,
                 runtimeLogSnapshot.samples(),
+                runtimeLogSnapshot.queryAttempts(),
                 includedEvidenceIds
         );
 
@@ -165,6 +176,7 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
 
     private CompressedEvidenceBundle.AlertSnapshot alertSnapshot(AlertEvent alert, List<InterfaceLogEntry> interfaceEntries) {
         double derivedFailureRate = failureRate(interfaceEntries);
+        AlertTriggerValues triggerValues = alert.triggerValues();
         return new CompressedEvidenceBundle.AlertSnapshot(
                 alert.category(),
                 alert.serviceName(),
@@ -172,21 +184,29 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
                 alert.cluster(),
                 alert.metricOccurTime(),
                 ALERT_REQUEST_COUNT_EVIDENCE_ID,
-                alert.triggerValues() != null && alert.triggerValues().requestCount() != null
-                        ? alert.triggerValues().requestCount()
+                triggerValues != null && triggerValues.requestCount() != null
+                        ? triggerValues.requestCount()
                         : (double) interfaceEntries.size(),
                 ALERT_FAIL_RATE_EVIDENCE_ID,
-                alert.triggerValues() != null && alert.triggerValues().failRate() != null
-                        ? alert.triggerValues().failRate()
+                triggerValues != null && triggerValues.failRate() != null
+                        ? triggerValues.failRate()
                         : derivedFailureRate,
                 ALERT_AVG_LATENCY_EVIDENCE_ID,
-                alert.triggerValues() != null && alert.triggerValues().avgLatencyMs() != null
-                        ? alert.triggerValues().avgLatencyMs()
+                triggerValues != null && triggerValues.avgLatencyMs() != null
+                        ? triggerValues.avgLatencyMs()
                         : averageLatency(interfaceEntries),
                 ALERT_P99_LATENCY_EVIDENCE_ID,
-                alert.triggerValues() != null && alert.triggerValues().p99LatencyMs() != null
-                        ? alert.triggerValues().p99LatencyMs()
-                        : percentile(interfaceEntries, 0.99)
+                triggerValues != null && triggerValues.p99LatencyMs() != null
+                        ? triggerValues.p99LatencyMs()
+                        : percentile(interfaceEntries, 0.99),
+                ALERT_FAILURE_COUNT_EVIDENCE_ID,
+                triggerValues == null ? null : triggerValues.failureCount(),
+                ALERT_LOG_LEVEL_EVIDENCE_ID,
+                triggerValues == null ? null : triggerValues.logLevel(),
+                ALERT_LOG_MESSAGE_EVIDENCE_ID,
+                triggerValues == null ? null : triggerValues.logMessage(),
+                ALERT_NORMALIZED_LOG_QUERY_EVIDENCE_ID,
+                triggerValues == null ? null : triggerValues.normalizedLogQuery()
         );
     }
 
@@ -260,8 +280,9 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
             List<String> insufficientEvidence
     ) {
         List<RuntimeLogEntry> ordered = runtimeLogs.stream()
+                .filter(java.util.Objects::nonNull)
                 .sorted(Comparator
-                        .comparing((RuntimeLogEntry entry) -> severityRank(entry.level()))
+                        .comparingInt((RuntimeLogEntry entry) -> severityRank(entry.level()))
                         .thenComparing(RuntimeLogEntry::timestamp, Comparator.nullsLast(Comparator.reverseOrder()))
                         .thenComparing(entry -> valueOrBlank(entry.serviceName()))
                         .thenComparing(entry -> valueOrBlank(entry.traceId()))
@@ -293,9 +314,25 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
         return List.copyOf(samples);
     }
 
+    private List<CompressedEvidenceBundle.RuntimeLogQueryAttempt> runtimeLogQueryAttempts(
+            List<RuntimeLogEvidence.QueryAttempt> queryAttempts
+    ) {
+        return queryAttempts.stream()
+                .filter(java.util.Objects::nonNull)
+                .map(attempt -> new CompressedEvidenceBundle.RuntimeLogQueryAttempt(
+                        attempt.evidenceId(),
+                        attempt.query(),
+                        attempt.level(),
+                        attempt.hitCount(),
+                        attempt.selected()
+                ))
+                .toList();
+    }
+
     private List<EvidenceReference> buildEvidenceReferences(
             RuleAnalysisEvidence ruleAnalysis,
             List<CompressedEvidenceBundle.RuntimeLogSample> runtimeLogs,
+            List<CompressedEvidenceBundle.RuntimeLogQueryAttempt> queryAttempts,
             Set<String> includedEvidenceIds
     ) {
         List<EvidenceReference> references = new ArrayList<>();
@@ -303,6 +340,10 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
         addReferenceIfIncluded(references, includedEvidenceIds, ALERT_FAIL_RATE_EVIDENCE_ID, "ALERT", "Current alert failure rate extracted from the alert trigger or interface logs.");
         addReferenceIfIncluded(references, includedEvidenceIds, ALERT_AVG_LATENCY_EVIDENCE_ID, "ALERT", "Current alert average latency extracted from the alert trigger or interface logs.");
         addReferenceIfIncluded(references, includedEvidenceIds, ALERT_P99_LATENCY_EVIDENCE_ID, "ALERT", "Current alert P99 latency extracted from the alert trigger or interface logs.");
+        addReferenceIfIncluded(references, includedEvidenceIds, ALERT_FAILURE_COUNT_EVIDENCE_ID, "ALERT", "Current service-error-log failure count extracted from the alert trigger.");
+        addReferenceIfIncluded(references, includedEvidenceIds, ALERT_LOG_LEVEL_EVIDENCE_ID, "ALERT", "Current service-error-log level extracted from the alert trigger.");
+        addReferenceIfIncluded(references, includedEvidenceIds, ALERT_LOG_MESSAGE_EVIDENCE_ID, "ALERT", "Current service-error-log message extracted from the alert trigger.");
+        addReferenceIfIncluded(references, includedEvidenceIds, ALERT_NORMALIZED_LOG_QUERY_EVIDENCE_ID, "ALERT", "Normalized service-error-log query extracted from the alert trigger.");
         addReferenceIfIncluded(references, includedEvidenceIds, BASELINE_REQUEST_COUNT_EVIDENCE_ID, "BASELINE", "Historical request-count baseline for the comparable time window.");
         addReferenceIfIncluded(references, includedEvidenceIds, BASELINE_FAIL_RATE_EVIDENCE_ID, "BASELINE", "Historical fail-rate baseline for the comparable time window.");
         addReferenceIfIncluded(references, includedEvidenceIds, BASELINE_AVG_LATENCY_EVIDENCE_ID, "BASELINE", "Historical average-latency baseline for the comparable time window.");
@@ -319,6 +360,21 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
                     "Runtime log sample [%s] for traceId=%s.".formatted(
                             valueOrBlank(runtimeLog.level()),
                             valueOrBlank(runtimeLog.traceId())
+                    )
+            );
+        }
+
+        for (CompressedEvidenceBundle.RuntimeLogQueryAttempt queryAttempt : queryAttempts) {
+            addReferenceIfIncluded(
+                    references,
+                    includedEvidenceIds,
+                    queryAttempt.evidenceId(),
+                    "RUNTIME_LOG_QUERY",
+                    "Runtime log query attempt level=%s query=%s hitCount=%s selected=%s.".formatted(
+                            valueOrBlank(queryAttempt.level()),
+                            valueOrBlank(queryAttempt.query()),
+                            queryAttempt.hitCount(),
+                            queryAttempt.selected()
                     )
             );
         }
@@ -360,6 +416,18 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
         if (alert.p99LatencyMs() != null) {
             addIfText(included, alert.p99LatencyEvidenceId());
         }
+        if (alert.failureCount() != null) {
+            addIfText(included, alert.failureCountEvidenceId());
+        }
+        if (alert.logLevel() != null) {
+            addIfText(included, alert.logLevelEvidenceId());
+        }
+        if (alert.logMessage() != null) {
+            addIfText(included, alert.logMessageEvidenceId());
+        }
+        if (alert.normalizedLogQuery() != null) {
+            addIfText(included, alert.normalizedLogQueryEvidenceId());
+        }
         if (baseline.collected()) {
             addIfText(included, baseline.requestCountEvidenceId());
             addIfText(included, baseline.failRateEvidenceId());
@@ -376,6 +444,10 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
         traces.observations().stream().map(TraceObservation::evidenceId).forEach(included::add);
         traces.downstreamObservations().stream().map(DownstreamObservation::evidenceId).forEach(included::add);
         runtimeLogs.samples().stream().map(CompressedEvidenceBundle.RuntimeLogSample::evidenceId).forEach(included::add);
+        runtimeLogs.queryAttempts().stream()
+                .map(CompressedEvidenceBundle.RuntimeLogQueryAttempt::evidenceId)
+                .filter(this::hasText)
+                .forEach(included::add);
         metrics.anomalies().stream().map(MetricAnomaly::evidenceId).forEach(included::add);
         ruleAnalysis.findings().stream()
                 .map(RuleFinding::evidenceIds)
@@ -485,7 +557,7 @@ public class DefaultEvidenceCompressor implements EvidenceCompressor {
     private int traceLimit(AlertCategory category, AnalysisOptions options) {
         return switch (category) {
             case RPC_LATENCY -> options.maxSlowTraceSampleSize();
-            case RPC_ERROR_RATE, UNKNOWN -> options.maxTraceSampleSize();
+            case RPC_ERROR_RATE, SERVICE_ERROR_LOG, UNKNOWN -> options.maxTraceSampleSize();
         };
     }
 

@@ -94,7 +94,9 @@ class DefaultProviderOrchestratorTests {
                     );
                 },
                 traceId -> List.of(new InterfaceLogEntry("trace-service", "trace.if", traceId, "span", null, "uid", true, null, null, 200L, Instant.now())),
-                (traceId, serviceName, window, limit) -> List.of(new RuntimeLogEntry(serviceName, traceId, "WARN", "runtime sample", Instant.now())),
+                runtimeLogProvider((traceId, serviceName, window, limit) -> List.of(
+                        runtimeLogEntry(serviceName, traceId, "WARN", "runtime sample", Instant.now())
+                )),
                 new StableContainerMetricProvider(),
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -131,9 +133,9 @@ class DefaultProviderOrchestratorTests {
                         new InterfaceLogEntry(serviceName, interfaceName, "trace-1", "1", null, "uid-1", false, "E1", "msg", 120L, window.endTime())
                 ),
                 traceId -> List.of(new InterfaceLogEntry("trace-service", "trace.if", traceId, "span", null, "uid", true, null, null, 200L, Instant.now())),
-                (traceId, serviceName, window, limit) -> {
+                runtimeLogProvider((traceId, serviceName, window, limit) -> {
                     throw new IllegalStateException("runtime provider unavailable");
-                },
+                }),
                 new StableContainerMetricProvider(),
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -162,7 +164,7 @@ class DefaultProviderOrchestratorTests {
                     throw new IllegalStateException("interface log provider unavailable");
                 },
                 traceId -> List.of(),
-                (traceId, serviceName, window, limit) -> List.of(),
+                runtimeLogProvider((traceId, serviceName, window, limit) -> List.of()),
                 new StableContainerMetricProvider(),
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -220,7 +222,7 @@ class DefaultProviderOrchestratorTests {
                 baselineProvider,
                 (serviceName, interfaceName, window, limit) -> List.of(),
                 traceId -> List.of(),
-                (traceId, serviceName, window, limit) -> List.of(),
+                runtimeLogProvider((traceId, serviceName, window, limit) -> List.of()),
                 containerMetricProvider,
                 cseMetricProvider,
                 new StableDatabaseMetricProvider(),
@@ -257,7 +259,7 @@ class DefaultProviderOrchestratorTests {
                         new InterfaceLogEntry(serviceName, interfaceName, "trace-1", "1", null, "uid-1", false, "E1", "msg", 120L, window.endTime())
                 ),
                 traceId -> List.of(),
-                (traceId, serviceName, window, limit) -> List.of(),
+                runtimeLogProvider((traceId, serviceName, window, limit) -> List.of()),
                 containerMetricProvider,
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -301,7 +303,7 @@ class DefaultProviderOrchestratorTests {
                     return List.of();
                 },
                 traceId -> List.of(),
-                (traceId, serviceName, window, limit) -> List.of(),
+                runtimeLogProvider((traceId, serviceName, window, limit) -> List.of()),
                 new StableContainerMetricProvider(),
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -339,7 +341,7 @@ class DefaultProviderOrchestratorTests {
                 (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
                 (serviceName, interfaceName, window, limit) -> List.of(),
                 traceId -> List.of(),
-                (traceId, serviceName, window, limit) -> List.of(),
+                runtimeLogProvider((traceId, serviceName, window, limit) -> List.of()),
                 new StableContainerMetricProvider(),
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -373,9 +375,9 @@ class DefaultProviderOrchestratorTests {
                         new InterfaceLogEntry(serviceName, interfaceName, "trace-1", "1", null, "uid-1", false, "E1", "msg", 120L, window.endTime())
                 ),
                 traceId -> List.of(new InterfaceLogEntry("trace-service", "trace.if", traceId, "span", null, "uid", true, null, null, 200L, Instant.now())),
-                (traceId, serviceName, window, limit) -> {
+                runtimeLogProvider((traceId, serviceName, window, limit) -> {
                     throw new IllegalStateException("runtime provider unavailable");
-                },
+                }),
                 new StableContainerMetricProvider(),
                 new StableCseMetricProvider(),
                 new StableDatabaseMetricProvider(),
@@ -391,6 +393,111 @@ class DefaultProviderOrchestratorTests {
         assertThat(result.missingEvidence())
                 .extracting("providerName")
                 .containsExactly(ProviderNames.RUNTIME_LOG, ProviderNames.PROVIDER_QUERY_MAPPING);
+    }
+
+    @Test
+    void collectServiceErrorLogCutsMessageQueryUntilRuntimeLogHit() {
+        CapturingRuntimeLogProvider runtimeLogProvider = new CapturingRuntimeLogProvider(true);
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                new InMemoryProviderCallLogRepository(),
+                fallbackResolver(),
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> List.of(),
+                traceId -> List.of(new InterfaceLogEntry("trace-service", "trace.if", traceId, "span", null, "uid", true, null, null, 200L, Instant.now())),
+                runtimeLogProvider,
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect("task-service-log-cut", serviceErrorLogContext());
+
+        assertThat(runtimeLogProvider.messageQueries)
+                .containsExactly("prebook loginAppointment failed", "loginAppointment failed");
+        assertThat(runtimeLogProvider.levels).containsOnly("ERROR");
+        assertThat(result.ruleFallbackRequired()).isFalse();
+        assertThat(result.runtimeLogEvidence().messageQueryMatched()).isTrue();
+        assertThat(result.runtimeLogEvidence().matchedLogQuery()).isEqualTo("loginAppointment failed");
+        assertThat(result.runtimeLogEvidence().sampledTraceIds()).containsExactly("trace-log-1", "trace-log-2");
+        assertThat(result.traceEvidence().collected()).isTrue();
+        assertThat(result.interfaceLogEvidence().collected()).isFalse();
+    }
+
+    @Test
+    void collectServiceErrorLogRequiresFallbackWhenAllMessageQueriesMiss() {
+        CapturingRuntimeLogProvider runtimeLogProvider = new CapturingRuntimeLogProvider(false);
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                new InMemoryProviderCallLogRepository(),
+                fallbackResolver(),
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> List.of(),
+                traceId -> List.of(),
+                runtimeLogProvider,
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect("task-service-log-miss", serviceErrorLogContext());
+
+        assertThat(result.ruleFallbackRequired()).isTrue();
+        assertThat(result.degradedReason()).contains("ERROR runtime log context");
+        assertThat(result.runtimeLogEvidence().collected()).isFalse();
+        assertThat(result.runtimeLogEvidence().messageQueryMatched()).isFalse();
+        assertThat(result.runtimeLogEvidence().matchedLogQuery()).isNull();
+        assertThat(result.runtimeLogEvidence().queryAttempts())
+                .extracting("query")
+                .containsExactly("prebook loginAppointment failed", "loginAppointment failed");
+        assertThat(result.runtimeLogEvidence().queryAttempts())
+                .allSatisfy(attempt -> {
+                    assertThat(attempt.level()).isEqualTo("ERROR");
+                    assertThat(attempt.hitCount()).isZero();
+                    assertThat(attempt.selected()).isFalse();
+                });
+        assertThat(result.missingEvidence())
+                .anySatisfy(missingEvidence -> {
+                    assertThat(missingEvidence.providerName()).isEqualTo(ProviderNames.RUNTIME_LOG);
+                    assertThat(missingEvidence.critical()).isTrue();
+                });
+    }
+
+    @Test
+    void collectServiceErrorLogStopsMessageQueriesWhenRuntimeProviderFails() {
+        CapturingRuntimeLogProvider runtimeLogProvider = new CapturingRuntimeLogProvider(true, true);
+        DefaultProviderOrchestrator orchestrator = orchestrator(
+                properties(true),
+                new InMemoryProviderCallLogRepository(),
+                fallbackResolver(),
+                (serviceName, cluster) -> ResourceMapping.empty(serviceName, cluster),
+                (serviceName, interfaceName, cluster, baselineWindow) -> InterfaceBaseline.empty(),
+                (serviceName, interfaceName, window, limit) -> List.of(),
+                traceId -> List.of(),
+                runtimeLogProvider,
+                new StableContainerMetricProvider(),
+                new StableCseMetricProvider(),
+                new StableDatabaseMetricProvider(),
+                new StableDcsMetricProvider(),
+                new StableMqMetricProvider()
+        );
+
+        ProviderCollectionResult result = orchestrator.collect("task-service-log-provider-fail", serviceErrorLogContext());
+
+        assertThat(runtimeLogProvider.messageQueries).containsExactly("prebook loginAppointment failed");
+        assertThat(result.ruleFallbackRequired()).isTrue();
+        assertThat(result.runtimeLogEvidence().collected()).isFalse();
+        assertThat(result.missingEvidence())
+                .anySatisfy(missingEvidence -> {
+                    assertThat(missingEvidence.providerName()).isEqualTo(ProviderNames.RUNTIME_LOG);
+                    assertThat(missingEvidence.critical()).isTrue();
+                });
     }
 
     private DefaultProviderOrchestrator orchestrator(
@@ -439,6 +546,36 @@ class DefaultProviderOrchestratorTests {
         );
     }
 
+    private AnalysisContext serviceErrorLogContext() {
+        Instant occurTime = Instant.parse("2026-04-21T02:33:00Z");
+        AlertEvent alert = new AlertEvent(
+                "alert-SERVICE_ERROR_LOG",
+                AlertCategory.SERVICE_ERROR_LOG,
+                "OPEN",
+                "MAJOR",
+                "ams_front",
+                null,
+                "cluster2",
+                "cn_product_default",
+                "tenant",
+                "application",
+                "service error log",
+                "service_error_log",
+                "AIOps@serviceLog",
+                "raw alert",
+                occurTime,
+                occurTime,
+                new AlertTriggerValues(null, null, null, null, null, 2.0, "ERROR", "prebook loginAppointment failed", "prebook loginAppointment failed", "demo", "raw")
+        );
+        return new AnalysisContext(
+                alert,
+                new TimeWindow(occurTime.minus(Duration.ofMinutes(5)), occurTime.plus(Duration.ofMinutes(2))),
+                new TimeWindow(occurTime.minus(Duration.ofDays(1)).minus(Duration.ofMinutes(5)), occurTime.minus(Duration.ofDays(1)).plus(Duration.ofMinutes(5))),
+                ResourceMapping.empty(alert.serviceName(), alert.cluster()),
+                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, 5, 8, 2, "ERROR", false, true)
+        );
+    }
+
     private AnalysisContext context(AlertCategory category) {
         Instant occurTime = Instant.parse("2026-04-21T02:33:00Z");
         AlertEvent alert = new AlertEvent(
@@ -458,14 +595,14 @@ class DefaultProviderOrchestratorTests {
                 "raw alert",
                 occurTime,
                 occurTime,
-                new AlertTriggerValues(20.0, 1.0, 3000L, null, null, "demo", "raw")
+                new AlertTriggerValues(20.0, 1.0, 3000L, null, null, null, null, null, null, "demo", "raw")
         );
         return new AnalysisContext(
                 alert,
                 new TimeWindow(occurTime.minus(Duration.ofMinutes(5)), occurTime.plus(Duration.ofMinutes(2))),
                 new TimeWindow(occurTime.minus(Duration.ofDays(1)).minus(Duration.ofMinutes(5)), occurTime.minus(Duration.ofDays(1)).plus(Duration.ofMinutes(5))),
                 ResourceMapping.empty(alert.serviceName(), alert.cluster()),
-                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, false, true)
+                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, 5, 8, 2, "ERROR", false, true)
         );
     }
 
@@ -491,6 +628,10 @@ class DefaultProviderOrchestratorTests {
                         500,
                         10,
                         10,
+                        5,
+                        8,
+                        2,
+                        "ERROR",
                         5
                 ),
                 new AiopsProperties.Provider(
@@ -530,6 +671,137 @@ class DefaultProviderOrchestratorTests {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new AssertionError(exception);
+        }
+    }
+
+    private RuntimeLogProvider runtimeLogProvider(RuntimeLogQuery query) {
+        return new RuntimeLogProvider() {
+            @Override
+            public List<RuntimeLogEntry> queryWarnAndErrorLogs(
+                    String traceId,
+                    String serviceName,
+                    TimeWindow window,
+                    int limit
+            ) {
+                return query.queryWarnAndErrorLogs(traceId, serviceName, window, limit);
+            }
+
+            @Override
+            public List<RuntimeLogEntry> queryByMessage(
+                    String serviceName,
+                    String cluster,
+                    String level,
+                    String messageQuery,
+                    TimeWindow window,
+                    int limit
+            ) {
+                return List.of();
+            }
+        };
+    }
+
+    private RuntimeLogEntry runtimeLogEntry(
+            String serviceName,
+            String traceId,
+            String level,
+            String message,
+            Instant timestamp
+    ) {
+        return new RuntimeLogEntry(
+                serviceName,
+                null,
+                null,
+                traceId,
+                null,
+                level,
+                null,
+                null,
+                message,
+                null,
+                null,
+                timestamp
+        );
+    }
+
+    @FunctionalInterface
+    private interface RuntimeLogQuery {
+
+        List<RuntimeLogEntry> queryWarnAndErrorLogs(String traceId, String serviceName, TimeWindow window, int limit);
+    }
+
+    private static final class CapturingRuntimeLogProvider implements RuntimeLogProvider {
+
+        private final boolean hitCutMessage;
+        private final boolean failFirstMessageQuery;
+        private final List<String> messageQueries = new CopyOnWriteArrayList<>();
+        private final List<String> levels = new CopyOnWriteArrayList<>();
+
+        private CapturingRuntimeLogProvider(boolean hitCutMessage) {
+            this(hitCutMessage, false);
+        }
+
+        private CapturingRuntimeLogProvider(boolean hitCutMessage, boolean failFirstMessageQuery) {
+            this.hitCutMessage = hitCutMessage;
+            this.failFirstMessageQuery = failFirstMessageQuery;
+        }
+
+        @Override
+        public List<RuntimeLogEntry> queryWarnAndErrorLogs(
+                String traceId,
+                String serviceName,
+                TimeWindow window,
+                int limit
+        ) {
+            return List.of();
+        }
+
+        @Override
+        public List<RuntimeLogEntry> queryByMessage(
+                String serviceName,
+                String cluster,
+                String level,
+                String messageQuery,
+                TimeWindow window,
+                int limit
+        ) {
+            messageQueries.add(messageQuery);
+            levels.add(level);
+            if (failFirstMessageQuery && messageQueries.size() == 1) {
+                throw new IllegalStateException("runtime message provider unavailable");
+            }
+            if (!hitCutMessage || !"loginAppointment failed".equals(messageQuery)) {
+                return List.of();
+            }
+            return List.of(
+                    new RuntimeLogEntry(
+                            serviceName,
+                            cluster,
+                            null,
+                            "trace-log-1",
+                            null,
+                            level,
+                            null,
+                            null,
+                            "prebook loginAppointment failed: trace-log-1",
+                            null,
+                            null,
+                            window.endTime()
+                    ),
+                    new RuntimeLogEntry(
+                            serviceName,
+                            cluster,
+                            null,
+                            "trace-log-2",
+                            null,
+                            level,
+                            null,
+                            null,
+                            "prebook loginAppointment failed: trace-log-2",
+                            null,
+                            null,
+                            window.endTime()
+                    )
+            );
         }
     }
 

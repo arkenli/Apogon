@@ -33,6 +33,10 @@ aiops:
     runtime-log-message-max-chars: 500
     max-error-code-size: 10
     max-uid-size: 10
+    error-log-message-query-max-attempts: 5
+    error-log-message-query-min-chars: 8
+    error-log-message-query-min-tokens: 2
+    error-log-query-level: ERROR
     history-query-max-limit: 5
 
   provider:

@@ -11,6 +11,10 @@ public record AnalysisOptions(
         int runtimeLogMessageMaxChars,
         int maxErrorCodeSize,
         int maxUidSize,
+        int errorLogMessageQueryMaxAttempts,
+        int errorLogMessageQueryMinChars,
+        int errorLogMessageQueryMinTokens,
+        String errorLogQueryLevel,
         boolean llmEnabled,
         boolean providerParallelEnabled
 ) {

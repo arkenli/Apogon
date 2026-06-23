@@ -197,14 +197,14 @@ class AnalysisJobWorkerTests {
                 "raw",
                 Instant.parse("2026-04-21T02:33:00Z"),
                 Instant.parse("2026-04-21T02:33:00Z"),
-                new AlertTriggerValues(6.0, 0.8, null, null, null, "demo", "raw")
+                new AlertTriggerValues(6.0, 0.8, null, null, null, null, null, null, null, "demo", "raw")
         );
         AnalysisContext context = new AnalysisContext(
                 alert,
                 new TimeWindow(alert.metricOccurTime().minus(Duration.ofMinutes(10)), alert.metricOccurTime().plus(Duration.ofMinutes(2))),
                 new TimeWindow(alert.metricOccurTime().minus(Duration.ofDays(1)).minus(Duration.ofMinutes(5)), alert.metricOccurTime().minus(Duration.ofDays(1)).plus(Duration.ofMinutes(5))),
                 ResourceMapping.empty(alert.serviceName(), alert.cluster()),
-                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, false, true)
+                new AnalysisOptions(2000, 20, 20, 50, 500, 10, 10, 5, 8, 2, "ERROR", false, true)
         );
         ProviderCollectionResult collection = new ProviderCollectionResult(
                 context,
@@ -241,12 +241,20 @@ class AnalysisJobWorkerTests {
                         "alert.avg.latency",
                         null,
                         "alert.p99.latency",
+                        null,
+                        "alert.failure.count",
+                        null,
+                        "alert.log.level",
+                        null,
+                        "alert.log.message",
+                        null,
+                        "alert.log.normalized_query",
                         null
                 ),
                 new CompressedEvidenceBundle.BaselineSnapshot(true, null, "baseline.request.count", "baseline.fail.rate", "baseline.avg.latency", "baseline.p99.latency", InterfaceBaseline.empty()),
                 new CompressedEvidenceBundle.InterfaceLogSnapshot(true, null, "interface.request.count", 6, "interface.failure.rate", 5, 0.8, "interface.latency.profile", 0L, 0L, 0L, 0L, List.of(), List.of(), List.of()),
                 new CompressedEvidenceBundle.TraceSnapshot(true, null, List.of(), List.of(), List.of()),
-                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of()),
+                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of(), false, null, List.of(), List.of()),
                 new CompressedEvidenceBundle.MetricSnapshot(true, null, ContainerMetrics.empty(), CseMetrics.empty(), DatabaseMetrics.empty(), DcsMetrics.empty(), MqMetrics.empty(), List.of()),
                 ResourceMapping.empty(alert.serviceName(), alert.cluster()),
                 new CompressedEvidenceBundle.RuleSnapshot(List.of(), List.of()),

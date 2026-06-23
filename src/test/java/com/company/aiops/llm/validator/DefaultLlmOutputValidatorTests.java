@@ -97,6 +97,43 @@ class DefaultLlmOutputValidatorTests {
                         .isEqualTo(LlmCallStatus.INVALID_EVIDENCE_REFERENCE));
     }
 
+    @Test
+    void validateAcceptsServiceErrorLogCauseTypes() {
+        for (String causeType : List.of("CURRENT_SERVICE_RUNTIME_EXCEPTION", "REPEATED_BUSINESS_LOG_ERROR")) {
+            LlmAnalysisOutput output = validator.validate("""
+                    {
+                      "summary": "valid summary",
+                      "impact": {
+                        "level": "LOW",
+                        "description": "low impact"
+                      },
+                      "rootCauses": [
+                        {
+                          "causeType": "%s",
+                          "description": "service log root cause",
+                          "confidence": 0.66,
+                          "evidenceIds": ["alert.request.count"],
+                          "reasoning": "model reasoning"
+                        }
+                      ],
+                      "recommendations": [
+                        {
+                          "priority": "P1",
+                          "actionType": "CHECK_LOG",
+                          "description": "check logs",
+                          "target": "demo.Interface.query"
+                        }
+                      ],
+                      "overallConfidence": 0.66,
+                      "insufficientEvidence": []
+                    }
+                    """.formatted(causeType), compressedEvidence());
+
+            assertThat(output.rootCauses()).singleElement().satisfies(rootCause ->
+                    assertThat(rootCause.causeType()).isEqualTo(causeType));
+        }
+    }
+
     private CompressedEvidenceBundle compressedEvidence() {
         return new CompressedEvidenceBundle(
                 new CompressedEvidenceBundle.AlertSnapshot(
@@ -112,12 +149,20 @@ class DefaultLlmOutputValidatorTests {
                         "alert.avg.latency",
                         null,
                         "alert.p99.latency",
+                        null,
+                        "alert.failure.count",
+                        null,
+                        "alert.log.level",
+                        null,
+                        "alert.log.message",
+                        null,
+                        "alert.log.normalized_query",
                         null
                 ),
                 new CompressedEvidenceBundle.BaselineSnapshot(true, null, "baseline.request.count", "baseline.fail.rate", "baseline.avg.latency", "baseline.p99.latency", InterfaceBaseline.empty()),
                 new CompressedEvidenceBundle.InterfaceLogSnapshot(true, null, "interface.request.count", 6, "interface.failure.rate", 5, 0.8, "interface.latency.profile", 0L, 0L, 0L, 0L, List.of(), List.of(), List.of()),
                 new CompressedEvidenceBundle.TraceSnapshot(true, null, List.of(), List.of(), List.of()),
-                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of()),
+                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of(), false, null, List.of(), List.of()),
                 new CompressedEvidenceBundle.MetricSnapshot(true, null, ContainerMetrics.empty(), CseMetrics.empty(), DatabaseMetrics.empty(), DcsMetrics.empty(), MqMetrics.empty(), List.of()),
                 ResourceMapping.empty("demo-service", "cluster1"),
                 new CompressedEvidenceBundle.RuleSnapshot(List.of(), List.of()),

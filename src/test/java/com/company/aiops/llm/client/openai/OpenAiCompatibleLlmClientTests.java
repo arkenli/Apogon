@@ -165,6 +165,10 @@ class OpenAiCompatibleLlmClientTests {
                         500,
                         10,
                         10,
+                        5,
+                        8,
+                        2,
+                        "ERROR",
                         5
                 ),
                 new AiopsProperties.Provider(

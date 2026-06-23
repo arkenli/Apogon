@@ -35,4 +35,23 @@ class RuleOnlyReplayIntegrationTests extends AbstractAiopsIntegrationTestSupport
         assertThat(data.path("result").path("llmStatus").asText()).isEqualTo("DISABLED");
         assertThat(data.path("result").path("rootCauses").toString()).contains("BUSINESS_ERROR_CODE_NOT_MASKED");
     }
+
+    @Test
+    void serviceErrorLogWebhookReplayUsesRuleEvidenceWhenLlmIsDisabled() {
+        String alertId = nextNumericAlertId();
+        String taskId = requireData(postWebhook(AlertSamples.withAlertId(AlertSamples.SERVICE_ERROR_LOG_ALERT, alertId)))
+                .path("taskId")
+                .asText();
+
+        AnalysisJob task = waitForTerminalTask(taskId);
+        assertThat(task.status()).isEqualTo(AnalysisJobStatus.SUCCESS);
+
+        JsonNode data = requireData(getTask(taskId));
+        JsonNode result = data.path("result");
+        assertThat(data.path("category").asText()).isEqualTo("SERVICE_ERROR_LOG");
+        assertThat(result.path("analysisMode").asText()).isEqualTo("RULE_BASED_ONLY");
+        assertThat(result.path("summary").asText()).contains("service error log");
+        assertThat(result.path("rootCauses").toString()).contains("CURRENT_SERVICE_RUNTIME_EXCEPTION");
+        assertThat(result.path("evidenceRefs").toString()).contains("runtime.query.attempt.1");
+    }
 }

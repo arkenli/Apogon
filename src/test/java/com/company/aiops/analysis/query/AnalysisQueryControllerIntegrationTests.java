@@ -288,7 +288,7 @@ class AnalysisQueryControllerIntegrationTests {
                 "raw text",
                 occurTime,
                 occurTime,
-                new AlertTriggerValues(10.0, 0.8, null, null, null, "rule", "raw trigger")
+                new AlertTriggerValues(10.0, 0.8, null, null, null, null, null, null, null, "rule", "raw trigger")
         );
     }
 

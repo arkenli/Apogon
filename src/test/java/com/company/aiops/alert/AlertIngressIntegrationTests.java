@@ -54,6 +54,44 @@ class AlertIngressIntegrationTests extends AbstractAiopsIntegrationTestSupport {
     }
 
     @Test
+    void parserParsesServiceErrorLogSample() {
+        AlertEvent parsed = alertParser.parse(AlertSamples.SERVICE_ERROR_LOG_ALERT);
+        AlertEvent alert = parsed.withCategory(alertClassifier.classify(parsed));
+
+        assertThat(alert.alertId()).isEqualTo("554631819");
+        assertThat(alert.category()).isEqualTo(AlertCategory.SERVICE_ERROR_LOG);
+        assertThat(alert.serviceName()).isEqualTo("ams_front");
+        assertThat(alert.interfaceName()).isNull();
+        assertThat(alert.cluster()).isEqualTo("cluster2");
+        assertThat(alert.rawCategory()).isEqualTo("AIOps@count");
+        assertThat(alert.metricName()).isEqualTo("CP_all_all_sevice_running_error_activity");
+        assertThat(alert.triggerValues().failureCount()).isEqualTo(2.0);
+        assertThat(alert.triggerValues().logLevel()).isEqualTo("ERROR");
+        assertThat(alert.triggerValues().logMessage()).isEqualTo("DEFAULT prebook loginAppointment failed");
+        assertThat(alert.triggerValues().normalizedLogQuery()).isEqualTo("prebook loginAppointment failed");
+        assertThat(alert.metricOccurTime()).isEqualTo(Instant.parse("2026-06-22T05:42:00Z"));
+    }
+
+    @Test
+    void serviceErrorLogWebhookCreatesTaskAndUsesServiceLogDedupeKey() {
+        String alertId = nextNumericAlertId();
+
+        ResponseEntity<JsonNode> response = postWebhook(AlertSamples.withAlertId(AlertSamples.SERVICE_ERROR_LOG_ALERT, alertId));
+
+        JsonNode data = requireData(response);
+        assertThat(data.path("duplicate").asBoolean()).isFalse();
+        assertThat(data.path("taskId").asText()).isNotBlank();
+
+        String dedupeKey = jdbcTemplate.queryForObject(
+                "SELECT dedupe_key FROM aiops_analysis_task WHERE alert_id = ?",
+                String.class,
+                alertId
+        );
+        assertThat(dedupeKey)
+                .isEqualTo("SERVICE_ERROR_LOG|ams_front|cluster2|prebook loginappointment failed");
+    }
+
+    @Test
     void duplicateWebhookWithinFiveMinutesReturnsExistingTask() {
         String firstAlertId = nextNumericAlertId();
         String secondAlertId = nextNumericAlertId();
@@ -95,4 +133,5 @@ class AlertIngressIntegrationTests extends AbstractAiopsIntegrationTestSupport {
         assertThat(data.path("historicalReference").path("summary").asText()).contains("historical replay");
         assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM aiops_analysis_task", Integer.class)).isEqualTo(2);
     }
+
 }

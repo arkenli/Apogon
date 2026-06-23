@@ -135,6 +135,14 @@ class RpcErrorRatePromptBuilderTests {
                         "alert.avg.latency",
                         null,
                         "alert.p99.latency",
+                        null,
+                        "alert.failure.count",
+                        null,
+                        "alert.log.level",
+                        null,
+                        "alert.log.message",
+                        null,
+                        "alert.log.normalized_query",
                         null
                 ),
                 new CompressedEvidenceBundle.BaselineSnapshot(
@@ -164,7 +172,7 @@ class RpcErrorRatePromptBuilderTests {
                         List.of()
                 ),
                 new CompressedEvidenceBundle.TraceSnapshot(true, null, List.of(), List.of(), List.of()),
-                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of()),
+                new CompressedEvidenceBundle.RuntimeLogSnapshot(true, null, List.of(), false, null, List.of(), List.of()),
                 new CompressedEvidenceBundle.MetricSnapshot(
                         true,
                         null,

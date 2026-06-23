@@ -23,6 +23,7 @@ public final class LlmOutputSchema {
     );
     public static final Set<String> ROOT_CAUSE_TYPES = Set.of(
             "BUSINESS_ERROR_CODE_NOT_MASKED",
+            "CURRENT_SERVICE_RUNTIME_EXCEPTION",
             "LOW_TRAFFIC_LIMITED_IMPACT",
             "DOWNSTREAM_RPC_FAILURE",
             "DOWNSTREAM_RPC_LATENCY",
@@ -34,6 +35,7 @@ public final class LlmOutputSchema {
             "CONTAINER_MEMORY_PRESSURE",
             "GC_PRESSURE",
             "INSTANCE_STARTING_OR_FAILED",
+            "REPEATED_BUSINESS_LOG_ERROR",
             "SINGLE_INSTANCE_ABNORMAL",
             "TRAFFIC_SPIKE",
             "UNKNOWN"

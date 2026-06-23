@@ -42,6 +42,21 @@ class DefaultAnalysisContextFactoryTests {
         assertThat(context.options().providerParallelEnabled()).isFalse();
     }
 
+    @Test
+    void createUsesServiceErrorLogWindowAndMessageQueryOptions() {
+        DefaultAnalysisContextFactory factory = new DefaultAnalysisContextFactory(defaultProperties(true));
+        AlertEvent alert = serviceErrorLogAlert();
+
+        AnalysisContext context = factory.create(alert);
+
+        assertThat(context.alarmWindow().startTime()).isEqualTo(Instant.parse("2026-06-22T05:37:00Z"));
+        assertThat(context.alarmWindow().endTime()).isEqualTo(Instant.parse("2026-06-22T05:44:00Z"));
+        assertThat(context.options().errorLogMessageQueryMaxAttempts()).isEqualTo(5);
+        assertThat(context.options().errorLogMessageQueryMinChars()).isEqualTo(8);
+        assertThat(context.options().errorLogMessageQueryMinTokens()).isEqualTo(2);
+        assertThat(context.options().errorLogQueryLevel()).isEqualTo("ERROR");
+    }
+
     private AiopsProperties defaultProperties(boolean parallelEnabled) {
         return new AiopsProperties(
                 new AiopsProperties.Analysis(
@@ -60,6 +75,10 @@ class DefaultAnalysisContextFactoryTests {
                         500,
                         10,
                         10,
+                        5,
+                        8,
+                        2,
+                        "ERROR",
                         5
                 ),
                 new AiopsProperties.Provider(
@@ -103,7 +122,42 @@ class DefaultAnalysisContextFactoryTests {
                 "raw alert",
                 occurTime,
                 occurTime,
-                new AlertTriggerValues(20.0, 1.0, 3000L, null, null, "demo", "raw")
+                new AlertTriggerValues(20.0, 1.0, 3000L, null, null, null, null, null, null, "demo", "raw")
+        );
+    }
+
+    private AlertEvent serviceErrorLogAlert() {
+        Instant occurTime = Instant.parse("2026-06-22T05:42:00Z");
+        return new AlertEvent(
+                "alert-service-error-log",
+                AlertCategory.SERVICE_ERROR_LOG,
+                "OPEN",
+                "MAJOR",
+                "ams_front",
+                null,
+                "cluster2",
+                "cn_product_default",
+                "tenant",
+                "application",
+                "CP域服务业务错误日志告警",
+                "CP_all_all_sevice_running_error_activity",
+                "AIOps@count",
+                "raw alert",
+                occurTime,
+                occurTime,
+                new AlertTriggerValues(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        2.0,
+                        "ERROR",
+                        "DEFAULT prebook loginAppointment failed",
+                        "prebook loginAppointment failed",
+                        "failureCount=2",
+                        "DEFAULT prebook loginAppointment failed"
+                )
         );
     }
 }

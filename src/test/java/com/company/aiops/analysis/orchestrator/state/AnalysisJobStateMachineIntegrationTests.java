@@ -173,7 +173,7 @@ class AnalysisJobStateMachineIntegrationTests {
                 "raw alert",
                 now,
                 now,
-                new AlertTriggerValues(20.0, 1.0, 3000L, null, null, "demo condition", "demo values")
+                new AlertTriggerValues(20.0, 1.0, 3000L, null, null, null, null, null, null, "demo condition", "demo values")
         ));
 
         analysisTaskRepository.save(new AnalysisJob(
