@@ -626,7 +626,7 @@ public interface AlertParser {
 2. interfaceName 可能包含 `://`、`/`、`.`、`_` 等特殊字符，不能使用过窄正则。
 3. `Details` 中的发生时间通常比 `Occur Time` 更接近指标触发时间，应优先作为 `metricOccurTime`。
 4. 服务错误日志告警默认没有 `interfaceName`，不能因为接口名为空直接解析失败；但必须解析出 `serviceName`、`cluster`、`metricOccurTime` 和日志 msg。
-5. 服务错误日志告警中 `告警信息` 里的 `日志=` 内容应写入 `logMessage`；构造 Provider 查询前应生成 `normalizedLogQuery`，规则是 trim 后移除开头单独出现的 `DEFAULT` token，再规整连续空白。
+5. 服务错误日志告警中 `告警信息` 里的 `日志=` 内容应解析为干净的 `logMessage`；解析时应 trim、移除开头单独出现的 `DEFAULT` token，并规整连续空白。`normalizedLogQuery` 默认与清洗后的 `logMessage` 一致。
 
 ### 7.2 AlertClassifier
 
@@ -1427,14 +1427,15 @@ Category: AIOps@count
 服务错误日志告警的第一关键证据是“触发告警的 ERROR 日志上下文”。查询前必须先做归一化：
 
 ```text
-rawMsg = alert.triggerValues.logMessage
-normalized = trim(rawMsg)
-normalized = removeLeadingTokenIgnoreCase(normalized, "DEFAULT")
-normalized = collapseWhitespace(normalized)
+rawLogField = alert detail "日志=" value
+logMessage = trim(rawLogField)
+logMessage = removeLeadingTokenIgnoreCase(logMessage, "DEFAULT")
+logMessage = collapseWhitespace(logMessage)
+normalizedLogQuery = logMessage
 level = "ERROR"
 ```
 
-只移除开头单独出现的 `DEFAULT` token，不能移除 message 中间的业务词。样例 `DEFAULT prebook loginAppointment failed` 的首轮查询词为 `prebook loginAppointment failed`。
+只移除开头单独出现的 `DEFAULT` token，不能移除 message 中间的业务词。样例 `DEFAULT prebook loginAppointment failed` 解析后的 `logMessage` 和首轮查询词均为 `prebook loginAppointment failed`。
 
 查询降级策略：
 
@@ -1532,7 +1533,7 @@ if failureCount <= 3:
     "occurTime": "2026-06-22T13:42:00+08:00",
     "failureCount": 2,
     "logLevel": "ERROR",
-    "logMessage": "DEFAULT prebook loginAppointment failed",
+    "logMessage": "prebook loginAppointment failed",
     "normalizedLogQuery": "prebook loginAppointment failed"
   },
   "runtimeLogQuery": {
@@ -2563,7 +2564,7 @@ aiops:
 1. Webhook 接口能接收错误率、时延和服务错误日志三个样例告警并创建任务。
 2. 错误率样例能解析出 `ams_front`、`vmall-ams.PrizeActivityService.queryPrizeResult`、`cluster1`、`AIOps@rate`。
 3. 时延样例能解析出 `vmall_ingresscache_ica`、接口名、`cluster2`、`AIOps@delay`。
-4. 服务错误日志样例能解析出 `ams_front`、`cluster2`、`AIOps@count`、`failureCount=2`、`logMessage=DEFAULT prebook loginAppointment failed` 和 `normalizedLogQuery=prebook loginAppointment failed`。
+4. 服务错误日志样例能解析出 `ams_front`、`cluster2`、`AIOps@count`、`failureCount=2`、`logMessage=prebook loginAppointment failed` 和 `normalizedLogQuery=prebook loginAppointment failed`。
 5. 服务错误日志查询 RuntimeLogProvider 时必须带 `level=ERROR`；完整 msg 无命中时会继续使用切割后的 msg 查询。
 6. 相同 dedupeKey 5 分钟内只创建一个分析任务。
 7. 相同 dedupeKey 5 分钟外的历史结果能返回 alertId、taskId 和摘要，且不阻止本次分析。

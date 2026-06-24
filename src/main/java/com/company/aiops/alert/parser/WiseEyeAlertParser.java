@@ -41,33 +41,29 @@ public class WiseEyeAlertParser implements AlertParser {
         Instant metricOccurTime = parseMetricOccurTime(rawText);
 
         return new AlertEvent(
-                extractSingleLineValue(rawText, "Alert ID"),
+                extractAlertId(rawText),
                 AlertCategory.UNKNOWN,
                 extractSingleLineValue(rawText, "Status"),
                 extractSingleLineValue(rawText, "Severity"),
                 firstNonBlank(hostFields.serviceName(), extractByPatterns(rawText,
                         "serviceName='([^']+)'",
-                        "服务名称[：:]?\\s*([^,，\\n]+)",
-                        "鏈嶅姟鍚嶇О[锛?]?\\s*([^,锛孿\\n]+)")),
+                        "服务名称[：:]?\\s*(.*?)(?=\\s*[,，]|\\s*\\d+、|\\r?\\n|$)")),
                 firstNonBlank(hostFields.interfaceName(), extractByPatterns(rawText,
                         "interfaceName='([^']+)'",
-                        "接口名称为([^,，\\n]+)",
-                        "接口[：:]\\s*([^,，\\n]+)",
-                        "鎺ュ彛鍚嶇О涓?([^,锛孿\\n]+)",
-                        "鎺ュ彛[锛?]\\s*([^,锛孿\\n]+)")),
+                        "接口名称为(.*?)(?=\\s*[,，]|\\s*\\d+、|\\r?\\n|$)",
+                        "接口[：:]\\s*(.*?)(?=\\s*[,，]|\\s*\\d+、|\\r?\\n|$)")),
                 firstNonBlank(hostFields.cluster(), extractByPatterns(rawText,
-                        "集群信息[：:]\\s*([^,，\\n]+)",
-                        "集群[：:]\\s*([^,，\\n]+)",
-                        "闆嗙兢[锛?]\\s*([^,锛孿\\n]+)")),
-                extractLastSingleLineValue(rawText, "Site"),
+                        "集群信息[：:]\\s*(.*?)(?=\\s*[,，]|\\s*\\d+、|\\r?\\n|$)",
+                        "集群[：:]\\s*(.*?)(?=\\s*[,，]|\\s*\\d+、|\\r?\\n|$)")),
+                firstNonBlank(extractLastSingleLineValue(rawText, "Site"), extractMetadataValue(rawText, "Site")),
                 extractSingleLineValue(rawText, "Tenant"),
                 extractSingleLineValue(rawText, "Application"),
-                extractByPatterns(rawText,
-                        "AlertName:\\s*([^,\\n]+)",
-                        "告警名称[：:]\\s*([^\\n\\r]+)",
-                        "鍛婅鍚嶇О[锛?]\\s*([^\\n\\r]+)"),
-                extractByPatterns(rawText, "MetricName:\\s*([^,\\n]+)"),
-                extractSingleLineValue(rawText, "Category"),
+                firstNonBlank(
+                        extractMetadataValue(rawText, "AlertName"),
+                        extractByPatterns(rawText, "告警名称[：:]\\s*(.*?)(?=\\s*\\d+、|\\s*(?:AlertName|Site|MetricName|Category)\\s*:|$)")
+                ),
+                extractMetadataValue(rawText, "MetricName"),
+                extractRawCategory(rawText),
                 rawText,
                 metricOccurTime,
                 Instant.now(),
@@ -90,9 +86,9 @@ public class WiseEyeAlertParser implements AlertParser {
         try {
             JsonNode hostJson = objectMapper.readTree(hostLine.substring(jsonStart, jsonEnd + 1));
             return new HostFields(
-                    jsonText(hostJson, "servicename", "serviceName", "服务名称", "鏈嶅姟鍚嶇О"),
-                    jsonText(hostJson, "interfacename", "interfaceName", "接口", "接口名称", "鎺ュ彛", "鎺ュ彛鍚嶇О"),
-                    jsonText(hostJson, "cluster", "clusterName", "集群", "闆嗙兢")
+                    jsonText(hostJson, "servicename", "serviceName", "服务名称"),
+                    jsonText(hostJson, "interfacename", "interfaceName", "接口", "接口名称"),
+                    jsonText(hostJson, "cluster", "clusterName", "集群")
             );
         } catch (Exception exception) {
             throw new AiopsException(ErrorCode.BAD_REQUEST, "Host 字段 JSON 解析失败");
@@ -101,26 +97,21 @@ public class WiseEyeAlertParser implements AlertParser {
 
     private AlertTriggerValues parseTriggerValues(String rawText) {
         String failRateText = extractByPatterns(rawText,
-                "失败率\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?\\s*%?)",
-                "澶辫触鐜.?\\s*=\\s*([0-9]+(?:\\.[0-9]+)?\\s*%?)");
-        String logMessage = extractByPatterns(rawText,
-                "日志\\s*[=：:]\\s*([^\\n\\r]*?)(?=\\s*[,，]\\s*(?:发生时间|告警发生时间|失败数|请求总数|失败率|平均时延|P99|p99|最大时延)\\s*[=：:]|\\s*(?:\\r?\\n|$))",
-                "log\\s*[=：:]\\s*([^\\n\\r]*?)(?=\\s*[,，]\\s*(?:occurTime|failureCount|requestCount|failRate)\\s*[=：:]|\\s*(?:\\r?\\n|$))");
+                "失败率\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?\\s*%?)");
+        String logMessage = normalizeLogMessage(extractByPatterns(rawText,
+                "日志\\s*[=：:]\\s*(.*?)(?=\\s*(?:[,，]\\s*(?:发生时间|告警发生时间|失败数|请求总数|失败率|平均时延|P99|p99|最大时延)\\s*[=：:]|\\d+、|AlertName\\s*:|Site\\s*:|MetricName\\s*:|Category\\s*:|\\|\\s*(?:alert_id|Source_ID)\\s*:|\\r?\\n|$))",
+                "log\\s*[=：:]\\s*(.*?)(?=\\s*(?:[,，]\\s*(?:occurTime|failureCount|requestCount|failRate)\\s*[=：:]|\\d+、|AlertName\\s*:|Site\\s*:|MetricName\\s*:|Category\\s*:|\\|\\s*(?:alert_id|Source_ID)\\s*:|\\r?\\n|$))"));
 
         return new AlertTriggerValues(
                 parseDouble(extractByPatterns(rawText,
-                        "请求总数\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)",
-                        "璇锋眰鎬绘暟\\s*=\\s*([0-9]+(?:\\.[0-9]+)?)")),
+                        "请求总数\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)")),
                 parseRate(failRateText),
                 parseLong(extractByPatterns(rawText,
-                        "平均时延\\s*[=：:]\\s*([0-9]+)",
-                        "骞冲潎鏃跺欢\\s*=\\s*([0-9]+)")),
+                        "平均时延\\s*[=：:]\\s*([0-9]+)")),
                 parseLong(extractByPatterns(rawText,
-                        "(?:P99|p99|99线)\\s*[=：:]\\s*([0-9]+)",
-                        "(?:P99|p99|99绾?)\\s*=\\s*([0-9]+)")),
+                        "(?:P99|p99|99线)\\s*[=：:]\\s*([0-9]+)")),
                 parseLong(extractByPatterns(rawText,
-                        "(?:最大时延|maxLatency|max)\\s*[=：:]\\s*([0-9]+)",
-                        "(?:鏈€澶ф椂寤|maxLatency|max)\\s*=\\s*([0-9]+)")),
+                        "(?:最大时延|maxLatency|max)\\s*[=：:]\\s*([0-9]+)")),
                 parseDouble(extractByPatterns(rawText,
                         "失败数\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)",
                         "failureCount\\s*[=：:]\\s*([0-9]+(?:\\.[0-9]+)?)")),
@@ -128,16 +119,13 @@ public class WiseEyeAlertParser implements AlertParser {
                 logMessage,
                 normalizeLogQuery(logMessage),
                 null,
-                extractByPatterns(rawText,
-                        "告警信息[：:]\\s*([^\\n\\r]+)",
-                        "鍛婅淇℃伅[锛?]\\s*([^\\n\\r]+)")
+                extractAlertInfo(rawText)
         );
     }
 
     private Instant parseMetricOccurTime(String rawText) {
         String detailsTime = extractByPatterns(rawText,
                 "(?:发生时间|告警发生时间)\\s*[=：:]\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
-                "(?:鍙戠敓鏃堕棿|鍛婅鍙戠敓鏃堕棿)\\s*=\\s*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
                 "occurTime='([^']+)'");
         Instant parsedDetailsTime = parseInstant(detailsTime);
         if (parsedDetailsTime != null) {
@@ -145,6 +133,29 @@ public class WiseEyeAlertParser implements AlertParser {
         }
 
         return parseInstant(extractSingleLineValue(rawText, "Occur Time"));
+    }
+
+    private String extractAlertId(String rawText) {
+        return firstNonBlank(
+                extractSingleLineValue(rawText, "Alert ID"),
+                extractByPatterns(rawText, "(?:^|[|,\\s])alert_id\\s*[:=]\\s*([^|,\\s]+)")
+        );
+    }
+
+    private String extractRawCategory(String rawText) {
+        return metadataToken(firstNonBlank(
+                extractSingleLineValue(rawText, "Category"),
+                extractMetadataValue(rawText, "Category")
+        ));
+    }
+
+    private String extractMetadataValue(String rawText, String label) {
+        return extractByPatterns(rawText, "(?:^|[|,\\s])" + Pattern.quote(label) + "\\s*:\\s*([^,|\\n\\r]+)");
+    }
+
+    private String extractAlertInfo(String rawText) {
+        return extractByPatterns(rawText,
+                "告警信息[：:]\\s*(.*?)(?=\\s*\\d+、|\\s*(?:AlertName|Site|MetricName|Category)\\s*:|\\s*\\|\\s*(?:alert_id|Source_ID)\\s*:|\\r?\\n|$)");
     }
 
     private String extractSingleLineValue(String rawText, String label) {
@@ -165,7 +176,7 @@ public class WiseEyeAlertParser implements AlertParser {
 
     private String extractByPatterns(String rawText, String... patterns) {
         for (String pattern : patterns) {
-            Matcher matcher = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE | Pattern.DOTALL)
+            Matcher matcher = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE)
                     .matcher(rawText);
             if (matcher.find()) {
                 return blankToNull(matcher.group(1));
@@ -222,12 +233,30 @@ public class WiseEyeAlertParser implements AlertParser {
         return parsed;
     }
 
+    private String normalizeLogMessage(String logMessage) {
+        if (logMessage == null) {
+            return null;
+        }
+        String normalized = logMessage.replaceAll("\\s+", " ");
+        return blankToNull(normalized.replaceFirst("(?i)^\\s*DEFAULT\\b\\s*", ""));
+    }
+
     private String normalizeLogQuery(String logMessage) {
         if (logMessage == null) {
             return null;
         }
-        String withoutDefault = logMessage.replaceFirst("(?i)^\\s*DEFAULT\\b\\s*", "");
-        return blankToNull(withoutDefault.replaceAll("\\s+", " "));
+        return normalizeLogMessage(logMessage);
+    }
+
+    private String metadataToken(String value) {
+        if (value == null) {
+            return null;
+        }
+        int pipeIndex = value.indexOf('|');
+        String token = pipeIndex >= 0 ? value.substring(0, pipeIndex) : value;
+        int commaIndex = token.indexOf(',');
+        token = commaIndex >= 0 ? token.substring(0, commaIndex) : token;
+        return blankToNull(token);
     }
 
     private String firstNonBlank(String first, String second) {

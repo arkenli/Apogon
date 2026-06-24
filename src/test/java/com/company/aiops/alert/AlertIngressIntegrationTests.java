@@ -67,7 +67,7 @@ class AlertIngressIntegrationTests extends AbstractAiopsIntegrationTestSupport {
         assertThat(alert.metricName()).isEqualTo("CP_all_all_sevice_running_error_activity");
         assertThat(alert.triggerValues().failureCount()).isEqualTo(2.0);
         assertThat(alert.triggerValues().logLevel()).isEqualTo("ERROR");
-        assertThat(alert.triggerValues().logMessage()).isEqualTo("DEFAULT prebook loginAppointment failed");
+        assertThat(alert.triggerValues().logMessage()).isEqualTo("prebook loginAppointment failed");
         assertThat(alert.triggerValues().normalizedLogQuery()).isEqualTo("prebook loginAppointment failed");
         assertThat(alert.metricOccurTime()).isEqualTo(Instant.parse("2026-06-22T05:42:00Z"));
     }
